@@ -285,6 +285,9 @@ class UserCreate(BaseModel):
     role: str = 'employee'
     department_id: Optional[int] = None
     temporary_password: str = Field(min_length=12,max_length=128)
+class UserRoleChange(BaseModel):
+    role: str = Field(min_length=4, max_length=12)
+
 class UserEdit(BaseModel):
     full_name: Optional[str] = Field(default=None,min_length=2,max_length=160)
     department_id: Optional[int] = None
@@ -410,6 +413,60 @@ def users(db: Session=Depends(get_db),s=Depends(require_login)):
     all_users=db.scalars(select(User).order_by(User.full_name)).all()
     return [user_data(u) for u in all_users if can_view_user(me,u)]
 
+def require_free_department_head(db: Session, department_id: int):
+    """Lock department for the entire transaction before checking assigned head.
+
+    All API head assignments use this lock to serialize concurrent requests on PostgreSQL.
+    The head is considered assigned even if the account is currently disabled.
+    """
+    dept = db.scalar(select(Department).where(Department.id == department_id).with_for_update())
+    if not dept:
+        raise HTTPException(400, 'القسم المحدد غير موجود')
+    current = db.scalar(select(User).where(User.department_id == department_id,
+                                           User.role == 'head').order_by(User.id).limit(1))
+    if current:
+        raise HTTPException(409, f'القسم «{dept.name}» له رئيس حالي: {current.full_name}. يجب تحويل رئيس القسم الحالي إلى موظف أولًا، ثم تعيين الرئيس الجديد.')
+    return dept
+
+
+@app.patch('/api/users/{user_id}/role')
+def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get_db), s=Depends(require_login)):
+    """Director-only, explicit one-at-a-time promotion/demotion; never swaps heads automatically."""
+    if s.user.role != 'director':
+        raise HTTPException(403, 'تغيير الأدوار متاح لمدير عام الإدارة فقط')
+    if data.role not in ('employee', 'head'):
+        raise HTTPException(400, 'الدور المستهدف يجب أن يكون موظفًا أو رئيس قسم')
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, 'الموظف غير موجود')
+    if target.role == 'director':
+        raise HTTPException(403, 'لا يمكن تغيير صلاحية المدير العام من هذه الشاشة')
+    if target.role == data.role:
+        raise HTTPException(400, 'الموظف لديه هذه الصلاحية بالفعل')
+    if not target.department_id:
+        raise HTTPException(400, 'يجب أن يكون الموظف مرتبطًا بقسم قبل تعيينه رئيسًا')
+    # Serialize promotions and demotions in the same department.
+    dept = db.scalar(select(Department).where(Department.id == target.department_id).with_for_update())
+    if not dept:
+        raise HTTPException(400, 'القسم غير موجود')
+    if data.role == 'head':
+        if not target.active:
+            raise HTTPException(400, 'لا يمكن تعيين حساب موقوف رئيسًا للقسم؛ فعّل الحساب أولًا')
+        require_free_department_head(db, target.department_id)
+    previous = target.role
+    target.role = data.role
+    # Immediately invalidate all old sessions, so demoted heads lose prior permissions.
+    for user_session in db.scalars(select(AuthSession).where(AuthSession.user_id == target.id,
+                                   AuthSession.logout_at.is_(None))):
+        user_session.logout_at = NOW()
+        user_session.ended_reason = 'role_changed'
+    audit(db, s.user_id, 'change_user_role',
+          f'employee_id={target.id},department_id={target.department_id},from={previous},to={target.role}')
+    db.commit()
+    return {'ok': True, 'user': user_data(target), 'previous_role': previous,
+            'sessions_revoked': True}
+
+
 @app.post('/api/users',status_code=201)
 def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_login)):
     me=s.user
@@ -421,6 +478,8 @@ def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_
     email=data.email.strip().lower()
     if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+',email):raise HTTPException(400,'البريد الإلكتروني غير صحيح')
     if db.scalar(select(User.id).where(User.email==email)):raise HTTPException(409,'البريد الإلكتروني مسجل مسبقاً')
+    if data.role == 'head':
+        require_free_department_head(db, data.department_id)
     u=User(full_name=data.full_name.strip(),email=email,role=data.role,department_id=data.department_id,password_hash=password_hasher.hash(data.temporary_password),must_change_password=True)
     db.add(u); db.flush();audit(db,me.id,'create_user',str(u.id));db.commit()
     return user_data(u)
@@ -434,6 +493,8 @@ def edit_user(user_id:int,data:UserEdit,db:Session=Depends(get_db),s=Depends(req
     if data.full_name is not None:u.full_name=data.full_name.strip()
     if data.department_id is not None:
         if me.role!='director' or not db.get(Department,data.department_id):raise HTTPException(403,'لا يمكن تغيير القسم')
+        if u.role == 'head' and data.department_id != u.department_id:
+            raise HTTPException(409,'يجب تحويل رئيس القسم إلى موظف أولًا قبل نقله إلى قسم آخر')
         if db.scalar(select(Task.id).where(Task.assigned_to==u.id,Task.status!='done').limit(1)):
             raise HTTPException(400,'يجب إعادة إسناد المهام المفتوحة قبل نقل الموظف')
         u.department_id=data.department_id
@@ -568,6 +629,26 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
             else:
                 kept.append(r)
         rows = kept
+    # The same single-head rule also applies to Excel preview and import.
+    # Existing head accounts, even disabled ones, must be demoted first.
+    head_by_department = {
+        u.department_id: u.full_name for u in db.scalars(select(User).where(User.role == 'head'))
+    }
+    accepted, incoming_head_by_dept = [], {}
+    for r in rows:
+        if r['role'] == 'head':
+            dept_id = r['department_id']
+            if dept_id in head_by_department:
+                errors.append({'row':r['row'],
+                               'message':f'القسم لديه رئيس حالي ({head_by_department[dept_id]})؛ يجب تحويله إلى موظف أولًا'})
+                continue
+            if dept_id in incoming_head_by_dept:
+                errors.append({'row':r['row'],
+                               'message':f'تم إدراج رئيس آخر لنفس القسم في الصف {incoming_head_by_dept[dept_id]}؛ لا يمكن تعيين رئيسين'})
+                continue
+            incoming_head_by_dept[dept_id] = r['row']
+        accepted.append(r)
+    rows = accepted
     errors.sort(key=lambda r:r['row'])
     return rows, errors
 
@@ -615,7 +696,7 @@ def download_bulk_template(db: Session=Depends(get_db), s=Depends(require_login)
         ['إرشادات استيراد الموظفين إلى إنجاز'],
         ['املأ صفًا لكل موظف في ورقة «الموظفون». لا تغيّر أسماء الأعمدة ولا تدرج صيغ Excel.'],
         ['الحقول الأربعة الأولى إلزامية: اسم الموظف، البريد الإلكتروني، كلمة المرور، الدور.'],
-        ['الدور المسموح: «موظف» أو «رئيس قسم». المدير العام لا يُنشأ عبر الاستيراد.'],
+        ['الدور المسموح: «موظف» أو «رئيس قسم». لا يمكن إضافة رئيس قسم إذا كان للقسم رئيس حالي؛ يجب تخفيض دور الرئيس الحالي أولًا.'],
         ['القسم اختياري داخل الجدول إذا اخترت قسمًا افتراضيًا في التطبيق؛ وإلا فيجب كتابته كما يظهر في التطبيق.'],
         ['كلمات المرور مؤقتة (12 حرفًا على الأقل) ويُلزم الموظف بتغييرها عند أول دخول.'],
         ['الاستيراد شامل: إذا وُجد خطأ في صف واحد فلن يُضاف أي موظف حتى تصحح الملف.'],
@@ -652,6 +733,9 @@ async def import_bulk_users(file: UploadFile=File(...), default_department_id: O
     if errors:
         return JSONResponse(status_code=422,content={'detail':'الملف يحتوي على أخطاء. لم تتم إضافة أي موظف','errors':errors})
     try:
+        # Lock departments and recheck for heads to prevent conflicts between preview and save.
+        for dept_id in sorted({r['department_id'] for r in rows if r['role'] == 'head'}):
+            require_free_department_head(db, dept_id)
         for r in rows:
             db.add(User(full_name=r['full_name'],email=r['email'],role=r['role'],department_id=r['department_id'],
                         password_hash=password_hasher.hash(r['password']),must_change_password=True))
