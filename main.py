@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError
-from fastapi import FastAPI, Depends, HTTPException, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, Request, Response, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -22,6 +22,10 @@ from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, String, Te
                         create_engine, func, select, and_, or_)
 from sqlalchemy.orm import (DeclarativeBase, Mapped, mapped_column, relationship,
                             sessionmaker, Session)
+from sqlalchemy.exc import IntegrityError
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.worksheet.datavalidation import DataValidation
 
 UTC = timezone.utc
 NOW = lambda: datetime.now(UTC)
@@ -360,6 +364,222 @@ def edit_user(user_id:int,data:UserEdit,db:Session=Depends(get_db),s=Depends(req
             active_s.logout_at=NOW();active_s.ended_reason='reset'
     audit(db,me.id,'edit_user',str(u.id));db.commit()
     return user_data(u)
+
+# Excel employee import: the file is processed in memory, never written to disk.
+# Passwords are neither returned in API results nor written to application logs.
+MAX_BULK_USERS = 100
+MAX_BULK_BYTES = 2 * 1024 * 1024
+IMPORT_HEADERS = ('اسم الموظف', 'البريد الإلكتروني', 'كلمة المرور', 'الدور', 'القسم')
+HEADER_ALIASES = {
+    'اسم الموظف':'name', 'اسم':'name', 'الاسم':'name', 'الاسم الكامل':'name', 'full_name':'name', 'name':'name',
+    'البريد الإلكتروني':'email', 'البريد الالكتروني':'email', 'البريد':'email', 'email':'email',
+    'كلمة المرور':'password', 'كلمة مرور':'password', 'كلمة المرور المؤقتة':'password', 'password':'password', 'temporary_password':'password',
+    'الدور':'role', 'role':'role', 'الصفة':'role', 'الصلاحية':'role',
+    'القسم':'department', 'اسم القسم':'department', 'department':'department',
+}
+IMPORT_ROLE_ALIASES = {'موظف':'employee', 'employee':'employee', 'رئيس قسم':'head', 'رئيس القسم':'head', 'head':'head'}
+
+
+def require_bulk_director(s):
+    if s.user.role != 'director':
+        raise HTTPException(403, 'الاستيراد الجماعي متاح لمدير عام الإدارة فقط')
+
+
+def normal_cell(value):
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
+def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optional[int]):
+    from zipfile import BadZipFile, ZipFile
+    if not content or len(content) > MAX_BULK_BYTES:
+        raise HTTPException(413, 'حجم الملف يجب ألا يتجاوز 2 ميجابايت')
+    try:
+        with ZipFile(io.BytesIO(content)) as archive:
+            if sum(x.file_size for x in archive.infolist()) > 12 * 1024 * 1024:
+                raise HTTPException(413, 'حجم البيانات الداخلية للملف كبير للغاية')
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=False, keep_links=False)
+        ws = wb.worksheets[0]
+        if (ws.max_row or 0) > 1002 or (ws.max_column or 0) > 20:
+            raise HTTPException(400, 'الملف يتضمن عددًا كبيرًا من الصفوف أو الأعمدة')
+        iterator = ws.iter_rows(min_row=1, max_col=min(ws.max_column or 5, 20))
+        first = next(iterator, None)
+        if not first:
+            raise HTTPException(400, 'ملف Excel فارغ')
+        columns = {}
+        for c, cell in enumerate(first):
+            key = HEADER_ALIASES.get(normal_cell(cell.value).lower())
+            if key:
+                if key in columns:
+                    raise HTTPException(400, f'العمود {normal_cell(cell.value)} مكرر')
+                columns[key] = c
+        missing = [h for h, k in zip(IMPORT_HEADERS[:4], ('name','email','password','role')) if k not in columns]
+        if missing:
+            raise HTTPException(400, 'الأعمدة الإلزامية غير موجودة: ' + '، '.join(missing))
+        departments = db.scalars(select(Department)).all()
+        departments_by_id = {d.id:d for d in departments}
+        departments_by_name = {d.name.strip():d for d in departments}
+        default_dept = departments_by_id.get(default_department_id) if default_department_id else None
+        if default_department_id is not None and default_dept is None:
+            raise HTTPException(400, 'القسم الافتراضي المحدد غير موجود')
+        rows = []
+        errors = []
+        seen = set()
+        for rownum, cells in enumerate(iterator, start=2):
+            def raw(key):
+                j = columns.get(key)
+                return cells[j] if j is not None and j < len(cells) else None
+            def value(key):
+                cell = raw(key)
+                return normal_cell(cell.value) if cell is not None else ''
+            if not any(value(k) for k in ('name','email','password','role','department')):
+                continue
+            if len(rows) + sum(1 for err in errors if err.get('row',0)>0) >= MAX_BULK_USERS:
+                raise HTTPException(400, f'الحد الأقصى هو {MAX_BULK_USERS} موظفًا في الملف الواحد؛ قسّم الملف إلى دفعات')
+            name, email, password, role_text, department_text = (value(k) for k in ('name','email','password','role','department'))
+            email = email.lower()
+            row_errors = []
+            for key in ('name', 'email', 'password', 'role', 'department'):
+                cell = raw(key)
+                if cell is not None and cell.data_type == 'f':
+                    row_errors.append('لا يُسمح باستخدام صيغ Excel في بيانات الموظفين')
+                    break
+            if not 2 <= len(name) <= 160:
+                row_errors.append('اسم الموظف مطلوب ويجب ألا يتجاوز 160 حرفًا')
+            if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email) or len(email)>200:
+                row_errors.append('البريد الإلكتروني غير صحيح')
+            elif email in seen:
+                row_errors.append('البريد الإلكتروني مكرر داخل الملف')
+            else:
+                seen.add(email)
+            if not isinstance(raw('password').value if raw('password') else None, str) or not 12 <= len(password) <= 128:
+                row_errors.append('كلمة المرور يجب أن تكون نصًا من 12 إلى 128 حرفًا')
+            role = IMPORT_ROLE_ALIASES.get(role_text.lower())
+            if not role:
+                row_errors.append('الدور يجب أن يكون موظفًا أو رئيس قسم فقط')
+            dept = departments_by_name.get(department_text) if department_text else default_dept
+            if not dept:
+                row_errors.append('القسم غير موجود أو لم يتم اختيار قسم افتراضي')
+            if row_errors:
+                errors.append({'row':rownum, 'message':'؛ '.join(row_errors)})
+            else:
+                rows.append({'row':rownum,'full_name':name,'email':email,'password':password,
+                             'role':role,'department_id':dept.id,'department':dept.name})
+        wb.close()
+    except HTTPException:
+        raise
+    except (BadZipFile, ValueError, OSError, KeyError, TypeError, EOFError) as err:
+        raise HTTPException(400,'تعذر قراءة ملف Excel. استخدم نموذج XLSX غير محمي بكلمة مرور') from err
+    if not rows and not errors:
+        raise HTTPException(400,'لا يحتوي الملف على موظفين')
+    if rows:
+        existing = set(db.scalars(select(User.email).where(User.email.in_([r['email'] for r in rows]))).all())
+        kept = []
+        for r in rows:
+            if r['email'] in existing:
+                errors.append({'row':r['row'], 'message':'البريد الإلكتروني مسجل مسبقًا في النظام'})
+            else:
+                kept.append(r)
+        rows = kept
+    errors.sort(key=lambda r:r['row'])
+    return rows, errors
+
+
+async def get_bulk_file(file: UploadFile):
+    if not file.filename or not file.filename.lower().endswith('.xlsx'):
+        raise HTTPException(400, 'اختر ملف Excel بصيغة .xlsx فقط')
+    content = await file.read(MAX_BULK_BYTES + 1)
+    await file.close()
+    if len(content)>MAX_BULK_BYTES:
+        raise HTTPException(413,'حجم الملف يجب ألا يتجاوز 2 ميجابايت')
+    return content
+
+
+@app.get('/api/users/import/template')
+def download_bulk_template(db: Session=Depends(get_db), s=Depends(require_login)):
+    require_bulk_director(s)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'الموظفون'
+    ws.sheet_view.rightToLeft = True
+    ws.append(list(IMPORT_HEADERS))
+    widths = [31, 39, 31, 20, 38]
+    for idx, (title, width) in enumerate(zip(IMPORT_HEADERS,widths),start=1):
+        col=ws.cell(1,idx)
+        col.fill=PatternFill('solid',fgColor='123E34')
+        col.font=Font(name='Arial',size=12,bold=True,color='FFFFFF')
+        col.alignment=Alignment(horizontal='center',vertical='center')
+        ws.column_dimensions[col.column_letter].width=width
+    ws.row_dimensions[1].height=32
+    for r in range(2,102):
+        for c in range(1,6):
+            cell=ws.cell(r,c)
+            cell.fill=PatternFill('solid',fgColor='F5F8F6' if r%2==0 else 'FFFFFF')
+            cell.alignment=Alignment(horizontal='right',vertical='center')
+            cell.number_format='@'  # preserve leading zeros and prevent date conversion of passwords
+    ws.freeze_panes='A2'
+    ws.auto_filter.ref='A1:E101'
+    dv=DataValidation(type='list',formula1='"موظف,رئيس قسم"',allow_blank=False)
+    dv.error='اختر موظف أو رئيس قسم';dv.errorTitle='دور غير صحيح';dv.showErrorMessage=True
+    ws.add_data_validation(dv);dv.add('D2:D101')
+    instructions=wb.create_sheet('تعليمات')
+    instructions.sheet_view.rightToLeft=True
+    notes=[
+        ['إرشادات استيراد الموظفين إلى إنجاز'],
+        ['املأ صفًا لكل موظف في ورقة «الموظفون». لا تغيّر أسماء الأعمدة ولا تدرج صيغ Excel.'],
+        ['الحقول الأربعة الأولى إلزامية: اسم الموظف، البريد الإلكتروني، كلمة المرور، الدور.'],
+        ['الدور المسموح: «موظف» أو «رئيس قسم». المدير العام لا يُنشأ عبر الاستيراد.'],
+        ['القسم اختياري داخل الجدول إذا اخترت قسمًا افتراضيًا في التطبيق؛ وإلا فيجب كتابته كما يظهر في التطبيق.'],
+        ['كلمات المرور مؤقتة (12 حرفًا على الأقل) ويُلزم الموظف بتغييرها عند أول دخول.'],
+        ['الاستيراد شامل: إذا وُجد خطأ في صف واحد فلن يُضاف أي موظف حتى تصحح الملف.'],
+        ['الحد الأقصى 100 موظف لكل ملف، وحجم الملف 2 ميجابايت.'],
+        ['مهم: الملف يتضمن كلمات مرور نصية. خزّنه في مكان آمن، ولا ترسله بالبريد أو المراسلات، واحذفه آمنًا بعد إنشاء الحسابات.'],
+        ['الأقسام المتاحة حاليًا:']
+    ]
+    notes.extend([[d.name] for d in db.scalars(select(Department).order_by(Department.id))])
+    for note in notes:instructions.append(note)
+    instructions.column_dimensions['A'].width=110
+    for i in range(1,len(notes)+1):
+        instructions.cell(i,1).alignment=Alignment(wrap_text=True,vertical='center',horizontal='right')
+        instructions.row_dimensions[i].height=28 if i==1 else 30
+    instructions['A1'].font=Font(size=16,bold=True,color='17664E')
+    output=io.BytesIO();wb.save(output);wb.close();output.seek(0)
+    return StreamingResponse(output,media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',headers={'Content-Disposition':'attachment; filename="enjaz_employees_template.xlsx"','Cache-Control':'no-store'})
+
+
+@app.post('/api/users/import/preview')
+async def preview_bulk_users(file: UploadFile=File(...), default_department_id: Optional[int]=Form(None),
+                             db: Session=Depends(get_db), s=Depends(require_login)):
+    require_bulk_director(s)
+    rows, errors = parse_bulk_sheet(await get_bulk_file(file),db,default_department_id)
+    return {'total':len(rows)+len(errors),'valid_count':len(rows),'error_count':len(errors),
+            'errors':errors,'preview':[{'row':r['row'],'name':r['full_name'],'email':r['email'],
+                                       'role':r['role'],'department':r['department']} for r in rows[:25]]}
+
+
+@app.post('/api/users/import')
+async def import_bulk_users(file: UploadFile=File(...), default_department_id: Optional[int]=Form(None),
+                            db: Session=Depends(get_db), s=Depends(require_login)):
+    require_bulk_director(s)
+    rows, errors = parse_bulk_sheet(await get_bulk_file(file),db,default_department_id)
+    if errors:
+        return JSONResponse(status_code=422,content={'detail':'الملف يحتوي على أخطاء. لم تتم إضافة أي موظف','errors':errors})
+    try:
+        for r in rows:
+            db.add(User(full_name=r['full_name'],email=r['email'],role=r['role'],department_id=r['department_id'],
+                        password_hash=password_hasher.hash(r['password']),must_change_password=True))
+        db.flush()
+        audit(db,s.user_id,'bulk_import_users',f'count={len(rows)}, heads={sum(r["role"] == "head" for r in rows)}')
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'حدث تعارض في البيانات أثناء الحفظ؛ راجع عناوين البريد ثم أعد المحاولة')
+    except Exception:
+        db.rollback()
+        raise
+    return {'created':len(rows),'message':f'تمت إضافة {len(rows)} حسابًا بنجاح','force_password_change':True}
+
 
 @app.get('/api/tasks')
 def tasks(db: Session=Depends(get_db),s=Depends(require_login)):
