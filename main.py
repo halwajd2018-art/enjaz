@@ -76,6 +76,16 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
     department: Mapped[Optional[Department]] = relationship()
 
+class UserRemoval(Base):
+    """Retain references to historical work; remove the employee from active lists."""
+    __tablename__ = 'user_removals'
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    removed_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    previous_email: Mapped[str] = mapped_column(String(200))
+    pending_tasks: Mapped[int] = mapped_column(Integer, default=0)
+    reason: Mapped[str] = mapped_column(String(500))
+    removed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+
 class AuthSession(Base):
     __tablename__ = 'auth_sessions'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -323,6 +333,27 @@ def actor(db, ses):
 def audit(db, user_id, action, details=''):
     db.add(Audit(actor_id=user_id, action=action, details=str(details)[:1000]))
 
+def pending_user_tasks(db: Session, user_id: int):
+    """Pending, non-cancelled tasks stay visible until explicitly reassigned."""
+    return select(Task).where(
+        Task.assigned_to == user_id,
+        Task.status != 'done',
+        ~Task.id.in_(select(TaskDeletion.task_id)),
+    )
+
+
+def assert_not_removed(db: Session, u: User):
+    if db.get(UserRemoval, u.id):
+        raise HTTPException(409, 'هذا الحساب محذوف إداريًا ولا يمكن تعديله أو إعادة تفعيله')
+
+
+def end_user_sessions(db: Session, user_id: int, reason: str):
+    for current in db.scalars(select(AuthSession).where(
+        AuthSession.user_id == user_id, AuthSession.logout_at.is_(None))):
+        current.logout_at = NOW()
+        current.ended_reason = reason
+
+
 def user_data(u):
     return {'id':u.id,'name':u.full_name,'email':u.email,'role':u.role,'department_id':None if u.role == 'advisor' else u.department_id,'department':None if u.role == 'advisor' else u.department.name if u.department else None,'active':u.active,'must_change_password':u.must_change_password}
 
@@ -350,7 +381,7 @@ def progress(task):
 def task_data(task, db):
     au = db.get(User, task.assigned_to)
     dept = db.get(Department, task.department_id)
-    return {'id':task.id,'title':task.title,'description':task.description,'output':task.output,'result_text':task.result_text,'department_id':task.department_id,'department':dept.name if dept else '', 'assigned_to':task.assigned_to,'assignee':au.full_name if au else '', 'created_by':task.created_by,'priority':task.priority,'status':task.status,'due_date':task.due_date.isoformat(),'created_at':iso(task.created_at),'updated_at':iso(task.updated_at),'progress':progress(task),'steps':[{'id':s.id,'title':s.title,'weight':s.weight,'done':s.done} for s in task.steps]}
+    return {'assignee_removed': db.get(UserRemoval, task.assigned_to) is not None, 'id':task.id,'title':task.title,'description':task.description,'output':task.output,'result_text':task.result_text,'department_id':task.department_id,'department':dept.name if dept else '', 'assigned_to':task.assigned_to,'assignee':au.full_name if au else '', 'created_by':task.created_by,'priority':task.priority,'status':task.status,'due_date':task.due_date.isoformat(),'created_at':iso(task.created_at),'updated_at':iso(task.updated_at),'progress':progress(task),'steps':[{'id':s.id,'title':s.title,'weight':s.weight,'done':s.done} for s in task.steps]}
 
 class LoginBody(BaseModel):
     email: str = Field(min_length=3, max_length=200)
@@ -383,10 +414,14 @@ class UserRoleChange(BaseModel):
     department_id: Optional[int] = Field(default=None, ge=1)
 
 class UserEdit(BaseModel):
+    email: Optional[str] = Field(default=None, min_length=5, max_length=200)
     full_name: Optional[str] = Field(default=None,min_length=2,max_length=160)
     department_id: Optional[int] = None
     active: Optional[bool] = None
     temporary_password: Optional[str] = Field(default=None,min_length=12,max_length=128)
+class UserDeleteBody(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
 class StepIn(BaseModel):
     title: str = Field(min_length=2,max_length=220)
     weight: int = Field(ge=1,le=100)
@@ -513,7 +548,7 @@ def departments(db: Session=Depends(get_db),s=Depends(require_login)):
 @app.get('/api/users')
 def users(db: Session=Depends(get_db),s=Depends(require_login)):
     me=s.user
-    all_users=db.scalars(select(User).order_by(User.full_name)).all()
+    all_users=db.scalars(select(User).where(~User.id.in_(select(UserRemoval.user_id))).order_by(User.full_name)).all()
     return [user_data(u) for u in all_users if can_view_user(me,u)]
 
 def require_free_department_head(db: Session, department_id: int):
@@ -528,8 +563,8 @@ def require_free_department_head(db: Session, department_id: int):
     if dept.name == GENERAL_MANAGEMENT_NAME:
         raise HTTPException(400, 'الإدارة العامة ارتباط تنظيمي مستقل، وليست قسمًا يُعين له رئيس قسم')
     current = db.scalar(select(User).where(User.department_id == department_id,
-                                           User.role == 'head').order_by(User.id).limit(1))
-    if current:
+                                           User.role == 'head', ~User.id.in_(select(UserRemoval.user_id))).order_by(User.id).limit(1))
+    if current and not db.get(UserRemoval,current.id):
         raise HTTPException(409, f'القسم «{dept.name}» له رئيس حالي: {current.full_name}. يجب تحويل رئيس القسم الحالي إلى موظف أولًا، ثم تعيين الرئيس الجديد.')
     return dept
 
@@ -545,6 +580,7 @@ def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(404, 'الموظف غير موجود')
+    assert_not_removed(db, target)
     if target.role == 'director':
         raise HTTPException(403, 'لا يمكن تغيير صلاحية المدير العام من هذه الشاشة')
     # Advisors cannot grant or revoke the sector-advisor role, even via direct API requests.
@@ -624,31 +660,91 @@ def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_
 def edit_user(user_id:int,data:UserEdit,db:Session=Depends(get_db),s=Depends(require_login)):
     me=s.user;u=db.get(User,user_id)
     if not u:raise HTTPException(404,'الموظف غير موجود')
+    assert_not_removed(db,u)
     if me.role not in ('head','director','advisor') or u.role=='director' or (u.role=='advisor' and me.role!='director') or (me.role=='head' and (u.role!='employee' or u.department_id!=me.department_id)):
         raise HTTPException(403,'الصلاحية غير متاحة')
     if data.full_name is not None:u.full_name=data.full_name.strip()
+    if data.email is not None:
+        if me.role != 'director':
+            raise HTTPException(403, 'تعديل البريد الإلكتروني للموظف من الإدارة متاح للمدير العام فقط')
+        new_email = data.email.strip().lower()
+        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', new_email):
+            raise HTTPException(400, 'البريد الإلكتروني غير صحيح')
+        if new_email != u.email:
+            if db.scalar(select(User.id).where(User.email == new_email, User.id != u.id)):
+                raise HTTPException(409, 'البريد الإلكتروني مسجل مسبقًا')
+            old_email=u.email
+            u.email=new_email
+            end_user_sessions(db,u.id,'email_changed_by_director')
+            audit(db,me.id,'change_employee_email',f'user={u.id},old={old_email},new={new_email}')
     if data.department_id is not None:
         if u.role == 'advisor':
             raise HTTPException(400, 'مستشار القطاع وظيفة مستقلة ولا يتبع أي قسم')
         if not is_executive(me) or not db.get(Department,data.department_id):raise HTTPException(403,'لا يمكن تغيير القسم')
         if u.role == 'head' and data.department_id != u.department_id:
             raise HTTPException(409,'يجب تحويل رئيس القسم إلى موظف أولًا قبل نقله إلى قسم آخر')
-        if db.scalar(select(Task.id).where(Task.assigned_to==u.id,Task.status!='done').limit(1)):
+        if me.role != 'director' and db.scalar(pending_user_tasks(db,u.id).with_only_columns(Task.id).limit(1)):
             raise HTTPException(400,'يجب إعادة إسناد المهام المفتوحة قبل نقل الموظف')
         u.department_id=data.department_id
     if data.active is not None:
-        if not data.active and db.scalar(select(Task.id).where(Task.assigned_to==u.id,Task.status!='done').limit(1)):
+        if not data.active and me.role != 'director' and db.scalar(pending_user_tasks(db,u.id).with_only_columns(Task.id).limit(1)):
             raise HTTPException(400,'يجب إعادة إسناد المهام المفتوحة قبل الإيقاف')
         u.active=data.active
         if not u.active:
-            for active_s in db.scalars(select(AuthSession).where(AuthSession.user_id==u.id,AuthSession.logout_at.is_(None))):
-                active_s.logout_at=NOW();active_s.ended_reason='disabled'
+            end_user_sessions(db,u.id,'disabled')
     if data.temporary_password is not None:
         u.password_hash=password_hasher.hash(data.temporary_password);u.must_change_password=True
-        for active_s in db.scalars(select(AuthSession).where(AuthSession.user_id==u.id,AuthSession.logout_at.is_(None))):
-            active_s.logout_at=NOW();active_s.ended_reason='reset'
-    audit(db,me.id,'edit_user',str(u.id));db.commit()
+        end_user_sessions(db,u.id,'reset')
+    audit(db,me.id,'edit_user',str(u.id))
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'البريد الإلكتروني مستخدم في حساب آخر')
     return user_data(u)
+
+
+@app.get('/api/users/{user_id}/removal-preview')
+def removal_preview(user_id:int, db:Session=Depends(get_db), s=Depends(require_login)):
+    if s.user.role!='director':raise HTTPException(403,'حذف الموظفين متاح للمدير العام فقط')
+    u=db.get(User,user_id)
+    if not u:raise HTTPException(404,'الموظف غير موجود')
+    if u.role=='director':raise HTTPException(403,'لا يمكن حذف مدير عام الإدارة')
+    assert_not_removed(db,u)
+    pending=db.scalars(pending_user_tasks(db,u.id).order_by(Task.due_date,Task.id)).all()
+    return {'user_id':u.id,'name':u.full_name,'pending_tasks_count':len(pending),
+            'pending_tasks':[{'id':t.id,'title':t.title,'department_id':t.department_id,'status':t.status}
+                             for t in pending[:15]]}
+
+
+@app.delete('/api/users/{user_id}')
+def remove_user(user_id:int, data:UserDeleteBody, db:Session=Depends(get_db), s=Depends(require_login)):
+    # Director-only soft removal; pending work and historical evidence are retained.
+    if s.user.role!='director':raise HTTPException(403,'حذف الموظفين متاح للمدير العام فقط')
+    u=db.scalar(select(User).where(User.id==user_id).with_for_update())
+    if not u:raise HTTPException(404,'الموظف غير موجود')
+    if u.role=='director':raise HTTPException(403,'لا يمكن حذف مدير عام الإدارة')
+    assert_not_removed(db,u)
+    reason=data.reason.strip()
+    if len(reason)<3:raise HTTPException(400,'أدخل سبب الحذف (3 أحرف على الأقل)')
+    pending=db.scalar(select(func.count(Task.id)).where(
+        Task.assigned_to==u.id,Task.status!='done',
+        ~Task.id.in_(select(TaskDeletion.task_id)))) or 0
+    previous_email=u.email
+    db.add(UserRemoval(user_id=u.id,removed_by=s.user_id,
+                       previous_email=previous_email,pending_tasks=pending,reason=reason))
+    u.active=False
+    # Release the login email for a future employee without deleting existing audit references.
+    u.email=f'archived-{u.id}-{secrets.token_hex(8)}@enjaz.invalid'
+    u.password_hash=password_hasher.hash(secrets.token_urlsafe(48))
+    end_user_sessions(db,u.id,'user_removed')
+    audit(db,s.user_id,'remove_user',
+          f'user={u.id},role={u.role},previous_email={previous_email},pending_tasks={pending},reason={reason}')
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'تعذر تنفيذ الحذف؛ تحقق من بيانات الحساب وأعد المحاولة')
+    return {'ok':True,'removed_user_id':u.id,'soft_deleted':True,'pending_tasks':pending,
+            'message':'تم حذف الحساب إداريًا، مع الاحتفاظ بالمهام غير المنجزة لإعادة إسنادها'}
 
 # Excel employee import: the file is processed in memory, never written to disk.
 # Passwords are neither returned in API results nor written to application logs.
