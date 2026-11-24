@@ -14,3 +14,31 @@
 .attachment-upload{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr) auto;align-items:end;gap:9px;border-top:1px solid var(--line);padding-top:12px}
 .attachment-upload .hint{grid-column:1/-1}.attachment-upload .form-field{min-width:0}
 @media(max-width:760px){.attachment-upload{grid-template-columns:1fr}.attach-item{align-items:flex-start;flex-direction:column}.attachment-upload .hint{grid-column:1}}
+
+/* Dashboard presence: online users by department, refreshed via /api/presence. */
+.presence-board{margin-bottom:18px;border:1px solid #d9e7de;background:linear-gradient(140deg,#fff 75%,#f3f9f5)}
+.presence-board-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:16px;flex-wrap:wrap}
+.presence-board-head h3{margin:0;font-size:17px;color:var(--green)}
+.presence-board-head p{font-size:12px;color:var(--muted);margin:3px 0 0}
+.presence-live-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#2ba477;box-shadow:0 0 0 4px rgba(43,164,119,.1);vertical-align:middle;margin-left:7px}
+.presence-totals{text-align:left;display:flex;flex-direction:column;gap:3px}
+.presence-totals b{font-size:17px;color:var(--green2)}
+.presence-totals small{font-size:11px;color:var(--muted)}
+.presence-departments{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr));gap:12px}
+.presence-dept{background:#fff;border:1px solid #dce7e0;border-radius:14px;overflow:hidden;min-width:0}
+.presence-dept-head{background:#f6faf7;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line)}
+.presence-dept-head h4{font-size:13px;margin:0;color:var(--green);font-weight:800;overflow-wrap:anywhere}
+.presence-dept-head small{font-size:11px;color:var(--muted)}
+.presence-count{display:flex;align-items:baseline;gap:4px;white-space:nowrap}
+.presence-count b{font-size:24px;color:var(--green2);line-height:1.1}
+.presence-count span{font-size:12px;color:var(--muted)}
+.presence-names{padding:8px 12px;max-height:230px;overflow-y:auto;min-height:54px}
+.presence-person{display:flex;align-items:start;gap:9px;padding:7px 1px}
+.presence-person+.presence-person{border-top:1px solid #edf1ee}
+.presence-person-dot{flex-shrink:0;width:8px;height:8px;border-radius:50%;margin-top:7px;background:#28a06d}
+.presence-person-info{min-width:0;display:grid;gap:1px}
+.presence-person-info strong{font-size:12px;overflow-wrap:anywhere}
+.presence-person-info small{font-size:10px;color:var(--muted)}
+.presence-empty{font-size:12px;color:#7e9188;padding:9px 3px}
+.presence-note{font-size:11px;color:var(--muted);margin:12px 0 0}
+@media(max-width:540px){.presence-board-head{align-items:start}.presence-totals{text-align:right}.presence-departments{grid-template-columns:1fr}}

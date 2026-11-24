@@ -858,6 +858,84 @@ def export_activity(user_id:Optional[int]=None,start:Optional[date]=None,end:Opt
     filename='enjaz_activity_'+(str(user_id) if user_id else 'all')+'.csv'
     return Response(data,media_type='text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="{filename}"'})
 
+@app.get('/api/presence')
+def presence(db: Session = Depends(get_db), s = Depends(require_login)):
+    """Live browser-session signals grouped by department, subject to role visibility.
+
+    An employee with several open sessions is counted once. This is not an
+    attendance, hours-worked, or productivity measurement.
+    """
+    me = s.user
+    now = NOW()
+    cutoff = now - timedelta(seconds=ONLINE_WINDOW_SECONDS)
+
+    users_query = select(User).where(User.active.is_(True)).order_by(User.full_name)
+    if me.role == 'head':
+        users_query = users_query.where(User.department_id == me.department_id) if me.department_id else users_query.where(User.id == me.id)
+    elif me.role == 'employee':
+        users_query = users_query.where(User.id == me.id)
+    visible_users = db.scalars(users_query).all()
+    ids = [u.id for u in visible_users]
+    recent_by_user = {}
+    if ids:
+        recent = db.execute(select(AuthSession.user_id, AuthSession.last_seen, AuthSession.last_activity).where(
+            AuthSession.user_id.in_(ids),
+            AuthSession.logout_at.is_(None),
+            AuthSession.expires_at > now,
+            AuthSession.last_seen >= cutoff,
+        )).all()
+        for user_id, seen, activity_at in recent:
+            seen = seen.replace(tzinfo=seen.tzinfo or UTC)
+            activity_at = activity_at.replace(tzinfo=activity_at.tzinfo or UTC)
+            if user_id not in recent_by_user or seen > recent_by_user[user_id][0]:
+                recent_by_user[user_id] = (seen, activity_at)
+
+    if me.role == 'director':
+        departments = db.scalars(select(Department).order_by(Department.id)).all()
+    elif me.department_id:
+        department = db.get(Department, me.department_id)
+        departments = [department] if department else []
+    else:
+        departments = []
+
+    groups = [{'department_id': d.id, 'department': d.name, 'total_staff': 0,
+               'online_count': 0, 'employees': []} for d in departments]
+    groups_by_id = {group['department_id']: group for group in groups}
+    if me.role == 'director' and any(u.department_id is None for u in visible_users):
+        office = {'department_id': None, 'department': 'الإدارة العامة', 'total_staff': 0,
+                  'online_count': 0, 'employees': []}
+        groups.append(office)
+        groups_by_id[None] = office
+    elif me.role != 'director' and me.department_id is None:
+        office = {'department_id': None, 'department': 'الإدارة العامة', 'total_staff': 0,
+                  'online_count': 0, 'employees': []}
+        groups.append(office)
+        groups_by_id[None] = office
+
+    for user in visible_users:
+        group = groups_by_id.get(user.department_id)
+        if group is None:
+            continue
+        group['total_staff'] += 1
+        recent = recent_by_user.get(user.id)
+        if recent is None:
+            continue
+        last_seen, last_activity = recent
+        group['online_count'] += 1
+        group['employees'].append({
+            'id': user.id, 'name': user.full_name, 'role': user.role,
+            'last_seen': iso(last_seen),
+            'active_now': last_activity >= now - timedelta(seconds=120),
+        })
+
+    return {
+        'as_of': iso(now), 'online_window_seconds': ONLINE_WINDOW_SECONDS,
+        'scope': me.role,
+        'total_staff': sum(group['total_staff'] for group in groups),
+        'online_total': sum(group['online_count'] for group in groups),
+        'departments': groups,
+    }
+
 @app.get('/api/dashboard')
 def dashboard(db:Session=Depends(get_db),s=Depends(require_login)):
     me=s.user;q=select(Task)
