@@ -86,3 +86,17 @@
 .employee-row .role-hint{margin-top:6px;color:#956526;font-size:11px;line-height:1.7}
 .employee-actions .btn:disabled{cursor:not-allowed;opacity:.48;filter:none}
 .employee-row>div:first-child{min-width:0;overflow-wrap:anywhere}
+
+/* App notifications: private chat, in-platform mail and task review/completion */
+.notice-bell{position:relative;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+#notificationCount:not(:empty){display:inline-flex;justify-content:center;align-items:center;background:#bb8a33;color:#fff;border-radius:12px;min-width:19px;height:19px;padding:0 4px;font-size:11px}
+.notice-summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}
+.notice-summary span{background:#f1f8f3;padding:9px 12px;border:1px solid #dde9df;border-radius:10px;font-size:12px}
+.notice-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.notice-items{display:grid;gap:8px;margin-bottom:16px;max-height:340px;overflow-y:auto}
+.notice-item{text-align:right;display:grid;gap:3px;border:1px solid #dfebe3;border-radius:10px;background:#fff;color:var(--ink);padding:11px;width:100%;white-space:normal}
+.notice-item.unread{border-right:4px solid var(--green2);background:#f4faf5}
+.notice-item.read{opacity:.78}
+.notice-item b{font-size:13px;color:var(--green)}.notice-item span{font-size:13px}.notice-item small{font-size:11px;color:var(--muted)}
+.task-discussion{height:min(49vh,370px);margin-bottom:12px}
+@media(max-width:540px){.notice-summary{flex-direction:column}.notice-bell{font-size:11px}}

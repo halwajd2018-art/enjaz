@@ -3,6 +3,7 @@ import csv
 import hashlib
 import hmac
 import io
+import json
 import mimetypes
 import os
 import re
@@ -21,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, String, Text, LargeBinary,
-                        create_engine, func, select, and_, or_)
+                        create_engine, func, select, and_, or_, UniqueConstraint)
 from sqlalchemy.orm import (DeclarativeBase, Mapped, mapped_column, relationship,
                             sessionmaker, Session)
 from sqlalchemy.exc import IntegrityError
@@ -159,6 +160,44 @@ class InternalMailEntry(Base):
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class TaskCreationKey(Base):
+    """Database-enforced idempotency: repeated creation requests return the original task."""
+    __tablename__ = 'task_creation_keys'
+    __table_args__ = (UniqueConstraint('user_id', 'request_id', name='uq_task_creation_request'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    request_id: Mapped[str] = mapped_column(String(80))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    task_id: Mapped[Optional[int]] = mapped_column(ForeignKey('tasks.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+
+class TaskDeletion(Base):
+    """Preserve audit evidence and attachments, while hiding cancelled tasks everywhere."""
+    __tablename__ = 'task_deletions'
+    task_id: Mapped[int] = mapped_column(ForeignKey('tasks.id'), primary_key=True)
+    deleted_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    reason: Mapped[str] = mapped_column(String(500))
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+
+class TaskNotice(Base):
+    __tablename__ = 'task_notices'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recipient_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    task_id: Mapped[int] = mapped_column(ForeignKey('tasks.id'), index=True)
+    kind: Mapped[str] = mapped_column(String(35))
+    title: Mapped[str] = mapped_column(String(250))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class ChatRead(Base):
+    __tablename__ = 'chat_reads'
+    __table_args__ = (UniqueConstraint('user_id', 'channel', name='uq_chat_read_user_channel'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    channel: Mapped[str] = mapped_column(String(100))
+    last_message_id: Mapped[int] = mapped_column(Integer, default=0)
+
 class Audit(Base):
     __tablename__ = 'audit_logs'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -246,9 +285,12 @@ def can_view_task(me, task):
 def can_approve(me, task):
     return me.role == 'director' or (me.role == 'head' and me.department_id == task.department_id)
 
+def is_deleted(db, task_id):
+    return db.get(TaskDeletion,task_id) is not None
+
 def get_task(db, task_id, me):
     task = db.get(Task, task_id)
-    if not task: raise HTTPException(404, 'المهمة غير موجودة')
+    if not task or is_deleted(db,task_id): raise HTTPException(404, 'المهمة غير موجودة')
     if not can_view_task(me, task): raise HTTPException(403, 'لا تملك صلاحية هذه المهمة')
     return task
 
@@ -305,6 +347,12 @@ class TaskCreate(BaseModel):
     due_date: date
     priority: str = 'medium'
     steps: list[StepIn] = Field(min_length=1,max_length=12)
+    request_id: Optional[str] = Field(default=None,max_length=80)
+class TaskDeleteBody(BaseModel):
+    reason: str = Field(min_length=3,max_length=500)
+class ChatReadBody(BaseModel):
+    channel: str = Field(min_length=1,max_length=100)
+    last_id: int = Field(ge=0)
 class StepToggle(BaseModel):
     done: bool
 class SubmitBody(BaseModel):
@@ -754,10 +802,15 @@ async def import_bulk_users(file: UploadFile=File(...), default_department_id: O
 @app.get('/api/tasks')
 def tasks(db: Session=Depends(get_db),s=Depends(require_login)):
     me=s.user
-    q=select(Task)
+    q=select(Task).where(~Task.id.in_(select(TaskDeletion.task_id)))
     if me.role=='head':q=q.where(Task.department_id==me.department_id)
     if me.role=='employee':q=q.where(Task.assigned_to==me.id)
     return [task_data(t,db) for t in db.scalars(q.order_by(Task.created_at.desc(),Task.id.desc()))]
+
+def task_notice(db, recipient_id:int, actor_id:int, task:Task, kind:str):
+    if recipient_id and recipient_id!=actor_id:
+        db.add(TaskNotice(recipient_id=recipient_id,actor_id=actor_id,
+                          task_id=task.id,kind=kind,title=task.title))
 
 @app.post('/api/tasks',status_code=201)
 def create_task(data:TaskCreate,db:Session=Depends(get_db),s=Depends(require_login)):
@@ -769,10 +822,47 @@ def create_task(data:TaskCreate,db:Session=Depends(get_db),s=Depends(require_log
     if not owner or not owner.active or owner.department_id!=data.department_id:raise HTTPException(400,'الموظف غير تابع للقسم أو غير نشط')
     if data.priority not in ('low','medium','high'):raise HTTPException(400,'الأولوية غير صحيحة')
     if sum(step.weight for step in data.steps)!=100:raise HTTPException(400,'يجب أن يكون مجموع أوزان المراحل 100%')
-    task=Task(title=data.title.strip(),description=data.description,output=data.output,department_id=data.department_id,assigned_to=data.assigned_to,created_by=me.id,due_date=data.due_date,priority=data.priority)
+    key=None
+    if data.request_id is not None:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{12,80}',data.request_id):
+            raise HTTPException(400,'معرّف الطلب غير صالح')
+        digest=hashlib.sha256(json.dumps(data.model_dump(exclude={'request_id'},mode='json'),
+            ensure_ascii=False,sort_keys=True).encode('utf-8')).hexdigest()
+        key=TaskCreationKey(user_id=me.id,request_id=data.request_id,payload_hash=digest)
+        db.add(key)
+        try: db.flush()   # UNIQUE constraint serializes concurrent identical requests
+        except IntegrityError:
+            db.rollback()
+            prior=db.scalar(select(TaskCreationKey).where(
+                TaskCreationKey.user_id==me.id,TaskCreationKey.request_id==data.request_id))
+            if prior and prior.payload_hash!=digest:
+                raise HTTPException(409,'معرّف الطلب مستخدم لتكليف مختلف')
+            task=db.get(Task,prior.task_id) if prior and prior.task_id else None
+            if not task or is_deleted(db,task.id):raise HTTPException(409,'التكليف السابق غير متاح')
+            return task_data(task,db)
+    task=Task(title=data.title.strip(),description=data.description,output=data.output,
+              department_id=data.department_id,assigned_to=data.assigned_to,
+              created_by=me.id,due_date=data.due_date,priority=data.priority)
     task.steps=[TaskStep(title=step.title.strip(),weight=step.weight) for step in data.steps]
-    db.add(task);db.flush();audit(db,me.id,'create_task',str(task.id));db.commit()
+    db.add(task);db.flush()
+    if key:key.task_id=task.id
+    task_notice(db,task.assigned_to,me.id,task,'assigned')
+    audit(db,me.id,'create_task',str(task.id));db.commit()
     return task_data(task,db)
+
+@app.delete('/api/tasks/{task_id}')
+def cancel_task(task_id:int,data:TaskDeleteBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    task=get_task(db,task_id,s.user)
+    if s.user.role!='director' and task.created_by!=s.user_id:
+        raise HTTPException(403,'حذف التكليف متاح لمصدره أو المدير العام فقط')
+    if task.status=='done':raise HTTPException(409,'لا يمكن حذف تكليف معتمد؛ يلزم إجراء تصحيحي إداري')
+    reason=data.reason.strip()
+    if len(reason)<3:raise HTTPException(400,'اكتب سبب الحذف')
+    db.add(TaskDeletion(task_id=task.id,deleted_by=s.user_id,reason=reason))
+    task_notice(db,task.assigned_to,s.user_id,task,'cancelled')
+    audit(db,s.user_id,'cancel_task',f'task={task.id};reason={reason}')
+    db.commit()
+    return {'ok':True,'deleted_task_id':task.id,'soft_deleted':True}
 
 # Attachment policy: small documents only, stored in DB for durability across Railway redeploys.
 # For large/long-term workloads use approved private object storage + malware scanning.
@@ -904,6 +994,7 @@ def assign_task(task_id:int,data:AssignBody,db:Session=Depends(get_db),s=Depends
     u=db.get(User,data.assigned_to)
     if not u or not u.active or u.department_id!=t.department_id:raise HTTPException(400,'الموظف غير نشط أو خارج القسم')
     prev=t.assigned_to;t.assigned_to=u.id;t.updated_at=NOW()
+    task_notice(db,u.id,me.id,t,'assigned')
     audit(db,me.id,'assign_task',f'task={t.id},from={prev},to={u.id}')
     db.commit();return task_data(t,db)
 
@@ -925,7 +1016,9 @@ def submit_task(task_id:int,data:SubmitBody,db:Session=Depends(get_db),s=Depends
     if t.assigned_to != me.id and not can_approve(me,t):raise HTTPException(403,'الصلاحية غير متاحة')
     if t.status=='done' or t.status=='review':raise HTTPException(409,'المهمة قيد المراجعة أو مكتملة')
     if not all(st.done for st in t.steps):raise HTTPException(409,'أكمل المراحل قبل رفع المهمة للمراجعة')
-    t.status='review';t.result_text=data.result_text.strip();t.updated_at=NOW();audit(db,me.id,'submit_task',str(t.id));db.commit();return task_data(t,db)
+    t.status='review';t.result_text=data.result_text.strip();t.updated_at=NOW()
+    task_notice(db,t.created_by,me.id,t,'review')
+    audit(db,me.id,'submit_task',str(t.id));db.commit();return task_data(t,db)
 
 @app.post('/api/tasks/{task_id}/decision')
 def task_decision(task_id:int,data:Decision,db:Session=Depends(get_db),s=Depends(require_login)):
@@ -934,6 +1027,7 @@ def task_decision(task_id:int,data:Decision,db:Session=Depends(get_db),s=Depends
     if t.status != 'review':raise HTTPException(409,'المهمة ليست قيد المراجعة')
     if data.decision not in ('approve','revision'):raise HTTPException(400,'قرار غير صالح')
     t.status='done' if data.decision=='approve' else 'revision';t.updated_at=NOW()
+    task_notice(db,t.assigned_to,me.id,t,'completed' if data.decision=='approve' else 'revision')
     audit(db,me.id,'task_'+data.decision,f'task={t.id},reason={data.reason}')
     if data.reason:
         db.add(Message(channel=f'task:{t.id}',sender_id=me.id,text=('اعتماد المهمة: ' if data.decision=='approve' else 'إعادة للمراجعة: ')+data.reason))
@@ -949,8 +1043,79 @@ def allowed_channel(me,channel,db):
         try:tid=int(channel.split(':')[1])
         except:return False
         task=db.get(Task,tid)
-        return bool(task and can_view_task(me,task))
+        return bool(task and not is_deleted(db,tid) and me.id in (task.created_by,task.assigned_to))
     return False
+
+def chat_channels_for(db:Session,me:User):
+    result=['general']
+    if me.role=='director':
+        result.extend('dept:'+str(dept_id) for dept_id in db.scalars(select(Department.id)).all())
+    elif me.department_id:result.append('dept:'+str(me.department_id))
+    # Task discussions: only the creator and current assignee can read or reply.
+    tasks=db.scalars(select(Task).where(or_(Task.created_by==me.id,Task.assigned_to==me.id),
+        ~Task.id.in_(select(TaskDeletion.task_id)))).all()
+    result.extend('task:'+str(task.id) for task in tasks)
+    return result
+
+def chat_unread_for(db:Session,me:User):
+    channels=chat_channels_for(db,me)
+    if not channels:return {}
+    # One grouped query instead of a query per task, important for production polling.
+    q=(select(Message.channel,func.count(Message.id))
+       .outerjoin(ChatRead,and_(ChatRead.user_id==me.id,ChatRead.channel==Message.channel))
+       .where(Message.channel.in_(channels),Message.sender_id!=me.id,
+              Message.id>func.coalesce(ChatRead.last_message_id,0))
+       .group_by(Message.channel))
+    return {channel:int(n) for channel,n in db.execute(q).all() if n}
+
+@app.post('/api/messages/read')
+def mark_chat_read(data:ChatReadBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    if not allowed_channel(s.user,data.channel,db):raise HTTPException(403,'المحادثة غير متاحة')
+    latest=db.scalar(select(func.max(Message.id)).where(Message.channel==data.channel)) or 0
+    new_id=min(data.last_id,latest)
+    mark=db.scalar(select(ChatRead).where(ChatRead.user_id==s.user_id,ChatRead.channel==data.channel))
+    if not mark:
+        mark=ChatRead(user_id=s.user_id,channel=data.channel,last_message_id=new_id);db.add(mark)
+        try:db.commit()
+        except IntegrityError:
+            db.rollback()
+            mark=db.scalar(select(ChatRead).where(ChatRead.user_id==s.user_id,ChatRead.channel==data.channel))
+            if mark and new_id>mark.last_message_id:mark.last_message_id=new_id;db.commit()
+    elif new_id>mark.last_message_id:
+        mark.last_message_id=new_id;db.commit()
+    return {'ok':True,'last_id':new_id}
+
+@app.get('/api/notifications')
+def notifications(db:Session=Depends(get_db),s=Depends(require_login)):
+    unread_events=db.scalar(select(func.count()).select_from(TaskNotice).where(
+        TaskNotice.recipient_id==s.user_id,TaskNotice.read_at.is_(None))) or 0
+    unread_mail=db.scalar(select(func.count(func.distinct(InternalMailEntry.thread_id))).where(
+        InternalMailEntry.recipient_id==s.user_id,InternalMailEntry.read_at.is_(None))) or 0
+    chats=chat_unread_for(db,s.user)
+    rows=db.scalars(select(TaskNotice).where(TaskNotice.recipient_id==s.user_id)
+        .order_by(TaskNotice.id.desc()).limit(25)).all()
+    return {'task_unread':int(unread_events),'mail_unread':int(unread_mail),
+            'chat_unread':sum(chats.values()),'chat_channels':chats,
+            'total_unread':int(unread_events+unread_mail+sum(chats.values())),
+            'events':[{'id':r.id,'task_id':r.task_id,'kind':r.kind,'title':r.title,
+                       'created_at':iso(r.created_at),'read':bool(r.read_at),
+                       'deleted':is_deleted(db,r.task_id)} for r in rows]}
+
+@app.post('/api/notifications/{notice_id}/read')
+def notification_read(notice_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    n=db.get(TaskNotice,notice_id)
+    if not n or n.recipient_id!=s.user_id:raise HTTPException(404,'الإشعار غير موجود')
+    if not n.read_at:n.read_at=NOW();db.commit()
+    return {'ok':True}
+
+@app.post('/api/notifications/read-all')
+def notification_read_all(db:Session=Depends(get_db),s=Depends(require_login)):
+    rows=db.scalars(select(TaskNotice).where(
+        TaskNotice.recipient_id==s.user_id,TaskNotice.read_at.is_(None))).all()
+    now=NOW()
+    for item in rows:item.read_at=now
+    if rows:db.commit()
+    return {'ok':True,'marked':len(rows)}
 
 @app.get('/api/messages')
 def get_messages(channel:str='general',after:int=0,db:Session=Depends(get_db),s=Depends(require_login)):
@@ -1089,7 +1254,7 @@ def presence(db: Session = Depends(get_db), s = Depends(require_login)):
 
 @app.get('/api/dashboard')
 def dashboard(db:Session=Depends(get_db),s=Depends(require_login)):
-    me=s.user;q=select(Task)
+    me=s.user;q=select(Task).where(~Task.id.in_(select(TaskDeletion.task_id)))
     if me.role=='head':q=q.where(Task.department_id==me.department_id)
     if me.role=='employee':q=q.where(Task.assigned_to==me.id)
     ts=db.scalars(q).all()
