@@ -138,6 +138,27 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
     sender: Mapped[User] = relationship()
 
+class InternalMailThread(Base):
+    """Private two-person in-app mail thread. Director has no bypass to third-party mail."""
+    __tablename__ = 'internal_mail_threads'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject: Mapped[str] = mapped_column(String(180))
+    initiator_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    recipient_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+
+class InternalMailEntry(Base):
+    __tablename__ = 'internal_mail_entries'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    thread_id: Mapped[int] = mapped_column(ForeignKey('internal_mail_threads.id', ondelete='CASCADE'), index=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    recipient_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Audit(Base):
     __tablename__ = 'audit_logs'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -245,6 +266,19 @@ class LoginBody(BaseModel):
 class ChangePasswordBody(BaseModel):
     old_password: str
     new_password: str = Field(min_length=12, max_length=128)
+class ChangeEmailBody(BaseModel):
+    new_email: str = Field(min_length=5, max_length=200)
+    current_password: str = Field(min_length=1, max_length=250)
+
+class InternalMailCompose(BaseModel):
+    recipient_id: int = Field(ge=1)
+    subject: str = Field(min_length=2, max_length=180)
+    body: str = Field(min_length=1, max_length=6000)
+
+class InternalMailReply(BaseModel):
+    body: str = Field(min_length=1, max_length=6000)
+
+
 class UserCreate(BaseModel):
     full_name: str = Field(min_length=2,max_length=160)
     email: str = Field(min_length=5,max_length=200)
@@ -332,6 +366,39 @@ def change_password(data: ChangePasswordBody, db: Session=Depends(get_db),s=Depe
         other.logout_at = NOW();other.ended_reason = 'password_changed'
     audit(db,s.user_id,'change_password');db.commit()
     return {'ok':True}
+
+@app.patch('/api/me/email')
+def update_own_email(data:ChangeEmailBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    """A user may update only their login email, after re-authentication."""
+    new_email=data.new_email.strip().lower()
+    if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', new_email):
+        raise HTTPException(400,'صيغة البريد الإلكتروني غير صحيحة')
+    if new_email == s.user.email:
+        raise HTTPException(400,'البريد الجديد مطابق للبريد الحالي')
+    throttle_key=hashlib.sha256(f'change-email:{s.user_id}'.encode()).hexdigest()
+    attempts=db.scalar(select(func.count()).select_from(LoginAttempt).where(
+        LoginAttempt.identity_hash==throttle_key,LoginAttempt.created_at>=NOW()-timedelta(minutes=15)))
+    if attempts>=8: raise HTTPException(429,'محاولات كثيرة، حاول بعد 15 دقيقة')
+    try:
+        if not password_hasher.verify(s.user.password_hash,data.current_password):
+            raise VerifyMismatchError('invalid')
+    except (VerifyMismatchError,VerificationError):
+        db.add(LoginAttempt(identity_hash=throttle_key));db.commit()
+        raise HTTPException(400,'كلمة المرور الحالية غير صحيحة')
+    if db.scalar(select(User.id).where(func.lower(User.email)==new_email,User.id!=s.user_id)):
+        raise HTTPException(409,'البريد الإلكتروني مستخدم في حساب آخر')
+    old_email=s.user.email
+    s.user.email=new_email
+    for other in db.scalars(select(AuthSession).where(AuthSession.user_id==s.user_id,
+                              AuthSession.id!=s.id,AuthSession.logout_at.is_(None))):
+        other.logout_at=NOW();other.ended_reason='email_changed'
+    db.query(LoginAttempt).filter(LoginAttempt.identity_hash==throttle_key).delete()
+    audit(db,s.user_id,'change_own_email',f'old={old_email},new={new_email}')
+    try:db.commit()
+    except IntegrityError:
+        db.rollback();raise HTTPException(409,'البريد الإلكتروني مستخدم في حساب آخر')
+    return {'ok':True,'user':user_data(s.user)}
+
 
 @app.get('/api/departments')
 def departments(db: Session=Depends(get_db),s=Depends(require_login)):
@@ -948,3 +1015,114 @@ def dashboard(db:Session=Depends(get_db),s=Depends(require_login)):
 def audit_logs(db:Session=Depends(get_db),s=Depends(require_login)):
     if s.user.role!='director':raise HTTPException(403,'الصلاحية غير متاحة')
     return [{'action':a.action,'actor_id':a.actor_id,'details':a.details,'created_at':iso(a.created_at)} for a in db.scalars(select(Audit).order_by(Audit.id.desc()).limit(250))]
+
+# Internal mail: private on-platform messaging (no SMTP, no external emails).
+# Each thread is between two active accounts; reads are strictly participant-only.
+def internal_mail_thread(db: Session,thread_id:int,user:User) -> InternalMailThread:
+    th=db.get(InternalMailThread,thread_id)
+    if not th or user.id not in (th.initiator_id,th.recipient_id):
+        raise HTTPException(404,'الرسالة غير موجودة')
+    return th
+
+
+def internal_mail_person(u: User):
+    return {'id':u.id,'name':u.full_name,'department':u.department.name if u.department else 'الإدارة العامة',
+            'role':u.role}
+
+
+def internal_mail_thread_summary(db: Session,th: InternalMailThread,me:User):
+    other_id=th.recipient_id if th.initiator_id==me.id else th.initiator_id
+    other=db.get(User,other_id)
+    latest=db.scalar(select(InternalMailEntry).where(InternalMailEntry.thread_id==th.id)
+                     .order_by(InternalMailEntry.id.desc()).limit(1))
+    unread=db.scalar(select(func.count()).select_from(InternalMailEntry).where(
+        InternalMailEntry.thread_id==th.id,InternalMailEntry.recipient_id==me.id,
+        InternalMailEntry.read_at.is_(None))) or 0
+    return {'id':th.id,'subject':th.subject,'other':internal_mail_person(other) if other else None,
+            'created_at':iso(th.created_at),'updated_at':iso(th.updated_at),
+            'last_body':latest.body[:180] if latest else '',
+            'last_sender_id':latest.sender_id if latest else None,
+            'unread_count':int(unread),'message_count':int(db.scalar(select(func.count()).select_from(InternalMailEntry).where(InternalMailEntry.thread_id==th.id)) or 0)}
+
+
+@app.get('/api/inbox/contacts')
+def internal_mail_contacts(db:Session=Depends(get_db),s=Depends(require_login)):
+    q=select(User).where(User.active.is_(True),User.id!=s.user_id).order_by(User.full_name)
+    return [internal_mail_person(user) for user in db.scalars(q)]
+
+
+@app.get('/api/inbox/unread')
+def internal_mail_unread(db:Session=Depends(get_db),s=Depends(require_login)):
+    rows=db.execute(select(func.count(func.distinct(InternalMailEntry.thread_id)),
+                           func.count(InternalMailEntry.id)).where(
+        InternalMailEntry.recipient_id==s.user_id,InternalMailEntry.read_at.is_(None))).one()
+    return {'unread_threads':rows[0],'unread_messages':rows[1]}
+
+
+@app.get('/api/inbox')
+def list_internal_mail(folder:str='inbox',db:Session=Depends(get_db),s=Depends(require_login)):
+    if folder not in ('inbox','sent'):
+        raise HTTPException(400,'المجلد غير صحيح')
+    match=InternalMailEntry.recipient_id if folder=='inbox' else InternalMailEntry.sender_id
+    ids=select(InternalMailEntry.thread_id).where(match==s.user_id).distinct()
+    q=select(InternalMailThread).where(InternalMailThread.id.in_(ids)).order_by(
+        InternalMailThread.updated_at.desc(), InternalMailThread.id.desc()).limit(200)
+    return {'folder':folder,'threads':[internal_mail_thread_summary(db,th,s.user) for th in db.scalars(q)]}
+
+
+@app.post('/api/inbox',status_code=201)
+def compose_internal_mail(data:InternalMailCompose,db:Session=Depends(get_db),s=Depends(require_login)):
+    receiver=db.get(User,data.recipient_id)
+    if not receiver or not receiver.active or receiver.id==s.user_id:
+        raise HTTPException(400,'اختر موظفًا نشطًا غير حسابك')
+    subject=data.subject.strip();body=data.body.strip()
+    if len(subject)<2 or not body:raise HTTPException(400,'اكتب الموضوع ونص الرسالة')
+    now=NOW()
+    thread=InternalMailThread(subject=subject,initiator_id=s.user_id,recipient_id=receiver.id,
+                              created_at=now,updated_at=now)
+    db.add(thread);db.flush()
+    db.add(InternalMailEntry(thread_id=thread.id,sender_id=s.user_id,recipient_id=receiver.id,
+                             body=body,created_at=now))
+    audit(db,s.user_id,'internal_mail_send',f'thread={thread.id},recipient={receiver.id}')
+    db.commit()
+    return {'id':thread.id,'ok':True}
+
+
+@app.get('/api/inbox/{thread_id}')
+def read_internal_mail(thread_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    thread=internal_mail_thread(db,thread_id,s.user)
+    items=db.scalars(select(InternalMailEntry).where(InternalMailEntry.thread_id==thread.id)
+                     .order_by(InternalMailEntry.id.asc()).limit(500)).all()
+    userids=set([thread.initiator_id,thread.recipient_id]);people={uid:db.get(User,uid) for uid in userids}
+    return {'thread':internal_mail_thread_summary(db,thread,s.user),'messages':[
+        {'id':x.id,'sender_id':x.sender_id,'sender':people[x.sender_id].full_name if people.get(x.sender_id) else '',
+         'recipient_id':x.recipient_id,'body':x.body,'created_at':iso(x.created_at),'read_at':iso(x.read_at)}
+        for x in items]}
+
+
+@app.post('/api/inbox/{thread_id}/read')
+def mark_internal_mail_read(thread_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    internal_mail_thread(db,thread_id,s.user)
+    entries=db.scalars(select(InternalMailEntry).where(
+        InternalMailEntry.thread_id==thread_id,InternalMailEntry.recipient_id==s.user_id,
+        InternalMailEntry.read_at.is_(None))).all()
+    now=NOW()
+    for e in entries:e.read_at=now
+    if entries:db.commit()
+    return {'ok':True,'marked':len(entries)}
+
+
+@app.post('/api/inbox/{thread_id}/reply',status_code=201)
+def reply_internal_mail(thread_id:int,data:InternalMailReply,db:Session=Depends(get_db),s=Depends(require_login)):
+    th=internal_mail_thread(db,thread_id,s.user)
+    other_id=th.recipient_id if s.user_id==th.initiator_id else th.initiator_id
+    other=db.get(User,other_id)
+    if not other or not other.active:raise HTTPException(409,'لا يمكن الرد على حساب غير نشط')
+    body=data.body.strip()
+    if not body:raise HTTPException(400,'اكتب نص الرد')
+    now=NOW();db.add(InternalMailEntry(thread_id=th.id,sender_id=s.user_id,recipient_id=other_id,
+                                       body=body,created_at=now))
+    th.updated_at=now
+    audit(db,s.user_id,'internal_mail_reply',f'thread={th.id},recipient={other_id}')
+    db.commit()
+    return {'ok':True,'thread_id':th.id}
