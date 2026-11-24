@@ -49,6 +49,10 @@ password_hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
 COOKIE_NAME = '__Host-enjaz_session' if IS_PROD else 'enjaz_session'
 SESSION_SECONDS = 12 * 60 * 60
 ONLINE_WINDOW_SECONDS = 75
+EXECUTIVE_ROLES = ('director', 'advisor')
+
+def is_executive(user):
+    return user.role in EXECUTIVE_ROLES
 
 class Base(DeclarativeBase):
     pass
@@ -277,13 +281,13 @@ def user_data(u):
     return {'id':u.id,'name':u.full_name,'email':u.email,'role':u.role,'department_id':u.department_id,'department':u.department.name if u.department else None,'active':u.active,'must_change_password':u.must_change_password}
 
 def can_view_user(me, other):
-    return me.role == 'director' or (me.role == 'head' and me.department_id == other.department_id) or me.id == other.id
+    return is_executive(me) or (me.role == 'head' and me.department_id == other.department_id) or me.id == other.id
 
 def can_view_task(me, task):
-    return me.role == 'director' or (me.role == 'head' and me.department_id == task.department_id) or task.assigned_to == me.id
+    return is_executive(me) or (me.role == 'head' and me.department_id == task.department_id) or task.assigned_to == me.id
 
 def can_approve(me, task):
-    return me.role == 'director' or (me.role == 'head' and me.department_id == task.department_id)
+    return is_executive(me) or (me.role == 'head' and me.department_id == task.department_id)
 
 def is_deleted(db, task_id):
     return db.get(TaskDeletion,task_id) is not None
@@ -479,31 +483,39 @@ def require_free_department_head(db: Session, department_id: int):
 
 @app.patch('/api/users/{user_id}/role')
 def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get_db), s=Depends(require_login)):
-    """Director-only, explicit one-at-a-time promotion/demotion; never swaps heads automatically."""
-    if s.user.role != 'director':
-        raise HTTPException(403, 'تغيير الأدوار متاح لمدير عام الإدارة فقط')
-    if data.role not in ('employee', 'head'):
-        raise HTTPException(400, 'الدور المستهدف يجب أن يكون موظفًا أو رئيس قسم')
+    """Director controls advisor appointments; advisor may manage heads/employees, not other advisors."""
+    me = s.user
+    if not is_executive(me):
+        raise HTTPException(403, 'تغيير الأدوار متاح لمدير عام الإدارة ومستشار القطاع فقط')
+    if data.role not in ('employee', 'head', 'advisor'):
+        raise HTTPException(400, 'الدور المستهدف غير معتمد')
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(404, 'الموظف غير موجود')
     if target.role == 'director':
         raise HTTPException(403, 'لا يمكن تغيير صلاحية المدير العام من هذه الشاشة')
+    # Advisors cannot grant or revoke the sector-advisor role, even via direct API requests.
+    if (data.role == 'advisor' or target.role == 'advisor') and me.role != 'director':
+        raise HTTPException(403, 'تعيين مستشار القطاع أو سحب صلاحياته متاح للمدير العام فقط')
     if target.role == data.role:
         raise HTTPException(400, 'الموظف لديه هذه الصلاحية بالفعل')
+    if target.role == 'head' and data.role == 'advisor':
+        raise HTTPException(409, 'يجب تحويل رئيس القسم إلى موظف أولًا قبل تعيينه مستشارًا للقطاع')
+    if target.role == 'advisor' and data.role == 'head':
+        raise HTTPException(409, 'يجب تحويل مستشار القطاع إلى موظف أولًا قبل تعيينه رئيسًا للقسم')
     if not target.department_id:
-        raise HTTPException(400, 'يجب أن يكون الموظف مرتبطًا بقسم قبل تعيينه رئيسًا')
-    # Serialize promotions and demotions in the same department.
+        raise HTTPException(400, 'يجب أن يكون الموظف مرتبطًا بقسم لتغيير دوره')
+    # Serialize promotions/demotions in this department, on PostgreSQL.
     dept = db.scalar(select(Department).where(Department.id == target.department_id).with_for_update())
     if not dept:
         raise HTTPException(400, 'القسم غير موجود')
+    if data.role in ('head', 'advisor') and not target.active:
+        raise HTTPException(400, 'لا يمكن ترقية حساب موقوف؛ فعّل الحساب أولًا')
     if data.role == 'head':
-        if not target.active:
-            raise HTTPException(400, 'لا يمكن تعيين حساب موقوف رئيسًا للقسم؛ فعّل الحساب أولًا')
         require_free_department_head(db, target.department_id)
     previous = target.role
     target.role = data.role
-    # Immediately invalidate all old sessions, so demoted heads lose prior permissions.
+    # Changes to executive scope require a new session for all affected accounts.
     for user_session in db.scalars(select(AuthSession).where(AuthSession.user_id == target.id,
                                    AuthSession.logout_at.is_(None))):
         user_session.logout_at = NOW()
@@ -514,12 +526,11 @@ def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get
     return {'ok': True, 'user': user_data(target), 'previous_role': previous,
             'sessions_revoked': True}
 
-
 @app.post('/api/users',status_code=201)
 def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_login)):
     me=s.user
     if me.role not in ('head','director'):raise HTTPException(403,'الصلاحية غير متاحة')
-    if data.role not in ('head','employee') or (me.role=='head' and data.role!='employee'):
+    if data.role not in ('head','employee','advisor') or (me.role=='head' and data.role!='employee'):
         raise HTTPException(400,'الدور غير مسموح')
     if not data.department_id or not db.get(Department,data.department_id):raise HTTPException(400,'القسم غير صحيح')
     if me.role=='head' and me.department_id!=data.department_id:raise HTTPException(403,'القسم غير مسموح')
@@ -536,11 +547,11 @@ def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_
 def edit_user(user_id:int,data:UserEdit,db:Session=Depends(get_db),s=Depends(require_login)):
     me=s.user;u=db.get(User,user_id)
     if not u:raise HTTPException(404,'الموظف غير موجود')
-    if me.role not in ('head','director') or u.role=='director' or (me.role=='head' and (u.role!='employee' or u.department_id!=me.department_id)):
+    if me.role not in ('head','director','advisor') or u.role=='director' or (u.role=='advisor' and me.role!='director') or (me.role=='head' and (u.role!='employee' or u.department_id!=me.department_id)):
         raise HTTPException(403,'الصلاحية غير متاحة')
     if data.full_name is not None:u.full_name=data.full_name.strip()
     if data.department_id is not None:
-        if me.role!='director' or not db.get(Department,data.department_id):raise HTTPException(403,'لا يمكن تغيير القسم')
+        if not is_executive(me) or not db.get(Department,data.department_id):raise HTTPException(403,'لا يمكن تغيير القسم')
         if u.role == 'head' and data.department_id != u.department_id:
             raise HTTPException(409,'يجب تحويل رئيس القسم إلى موظف أولًا قبل نقله إلى قسم آخر')
         if db.scalar(select(Task.id).where(Task.assigned_to==u.id,Task.status!='done').limit(1)):
@@ -572,7 +583,7 @@ HEADER_ALIASES = {
     'الدور':'role', 'role':'role', 'الصفة':'role', 'الصلاحية':'role',
     'القسم':'department', 'اسم القسم':'department', 'department':'department',
 }
-IMPORT_ROLE_ALIASES = {'موظف':'employee', 'employee':'employee', 'رئيس قسم':'head', 'رئيس القسم':'head', 'head':'head'}
+IMPORT_ROLE_ALIASES = {'موظف':'employee', 'employee':'employee', 'رئيس قسم':'head', 'رئيس القسم':'head', 'head':'head', 'مستشار القطاع':'advisor', 'مستشار':'advisor', 'advisor':'advisor'}
 
 
 def require_bulk_director(s):
@@ -652,7 +663,7 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
                 row_errors.append('كلمة المرور يجب أن تكون نصًا من 12 إلى 128 حرفًا')
             role = IMPORT_ROLE_ALIASES.get(role_text.lower())
             if not role:
-                row_errors.append('الدور يجب أن يكون موظفًا أو رئيس قسم فقط')
+                row_errors.append('الدور يجب أن يكون موظفًا أو رئيس قسم أو مستشار القطاع')
             dept = departments_by_name.get(department_text) if department_text else default_dept
             if not dept:
                 row_errors.append('القسم غير موجود أو لم يتم اختيار قسم افتراضي')
@@ -735,8 +746,8 @@ def download_bulk_template(db: Session=Depends(get_db), s=Depends(require_login)
             cell.number_format='@'  # preserve leading zeros and prevent date conversion of passwords
     ws.freeze_panes='A2'
     ws.auto_filter.ref='A1:E101'
-    dv=DataValidation(type='list',formula1='"موظف,رئيس قسم"',allow_blank=False)
-    dv.error='اختر موظف أو رئيس قسم';dv.errorTitle='دور غير صحيح';dv.showErrorMessage=True
+    dv=DataValidation(type='list',formula1='"موظف,رئيس قسم,مستشار القطاع"',allow_blank=False)
+    dv.error='اختر موظف أو رئيس قسم أو مستشار القطاع';dv.errorTitle='دور غير صحيح';dv.showErrorMessage=True
     ws.add_data_validation(dv);dv.add('D2:D101')
     instructions=wb.create_sheet('تعليمات')
     instructions.sheet_view.rightToLeft=True
@@ -744,7 +755,7 @@ def download_bulk_template(db: Session=Depends(get_db), s=Depends(require_login)
         ['إرشادات استيراد الموظفين إلى إنجاز'],
         ['املأ صفًا لكل موظف في ورقة «الموظفون». لا تغيّر أسماء الأعمدة ولا تدرج صيغ Excel.'],
         ['الحقول الأربعة الأولى إلزامية: اسم الموظف، البريد الإلكتروني، كلمة المرور، الدور.'],
-        ['الدور المسموح: «موظف» أو «رئيس قسم». لا يمكن إضافة رئيس قسم إذا كان للقسم رئيس حالي؛ يجب تخفيض دور الرئيس الحالي أولًا.'],
+        ['الدور المسموح: «موظف» أو «رئيس قسم» أو «مستشار القطاع». لا يمكن إضافة رئيس قسم إذا كان للقسم رئيس حالي؛ يجب تخفيض دور الرئيس الحالي أولًا. استيراد المستخدمين متاح لمدير عام الإدارة فقط.'],
         ['القسم اختياري داخل الجدول إذا اخترت قسمًا افتراضيًا في التطبيق؛ وإلا فيجب كتابته كما يظهر في التطبيق.'],
         ['كلمات المرور مؤقتة (12 حرفًا على الأقل) ويُلزم الموظف بتغييرها عند أول دخول.'],
         ['الاستيراد شامل: إذا وُجد خطأ في صف واحد فلن يُضاف أي موظف حتى تصحح الملف.'],
@@ -853,7 +864,7 @@ def create_task(data:TaskCreate,db:Session=Depends(get_db),s=Depends(require_log
 @app.delete('/api/tasks/{task_id}')
 def cancel_task(task_id:int,data:TaskDeleteBody,db:Session=Depends(get_db),s=Depends(require_login)):
     task=get_task(db,task_id,s.user)
-    if s.user.role!='director' and task.created_by!=s.user_id:
+    if not is_executive(s.user) and task.created_by!=s.user_id:
         raise HTTPException(403,'حذف التكليف متاح لمصدره أو المدير العام فقط')
     if task.status=='done':raise HTTPException(409,'لا يمكن حذف تكليف معتمد؛ يلزم إجراء تصحيحي إداري')
     reason=data.reason.strip()
@@ -1038,7 +1049,7 @@ def allowed_channel(me,channel,db):
     if channel.startswith('dept:'):
         try:dept=int(channel.split(':')[1])
         except: return False
-        return me.role=='director' or me.department_id==dept
+        return is_executive(me) or me.department_id==dept
     if channel.startswith('task:'):
         try:tid=int(channel.split(':')[1])
         except:return False
@@ -1048,7 +1059,7 @@ def allowed_channel(me,channel,db):
 
 def chat_channels_for(db:Session,me:User):
     result=['general']
-    if me.role=='director':
+    if is_executive(me):
         result.extend('dept:'+str(dept_id) for dept_id in db.scalars(select(Department.id)).all())
     elif me.department_id:result.append('dept:'+str(me.department_id))
     # Task discussions: only the creator and current assignee can read or reply.
@@ -1206,7 +1217,7 @@ def presence(db: Session = Depends(get_db), s = Depends(require_login)):
             if user_id not in recent_by_user or seen > recent_by_user[user_id][0]:
                 recent_by_user[user_id] = (seen, activity_at)
 
-    if me.role == 'director':
+    if is_executive(me):
         departments = db.scalars(select(Department).order_by(Department.id)).all()
     elif me.department_id:
         department = db.get(Department, me.department_id)
@@ -1217,12 +1228,12 @@ def presence(db: Session = Depends(get_db), s = Depends(require_login)):
     groups = [{'department_id': d.id, 'department': d.name, 'total_staff': 0,
                'online_count': 0, 'employees': []} for d in departments]
     groups_by_id = {group['department_id']: group for group in groups}
-    if me.role == 'director' and any(u.department_id is None for u in visible_users):
+    if is_executive(me) and any(u.department_id is None for u in visible_users):
         office = {'department_id': None, 'department': 'الإدارة العامة', 'total_staff': 0,
                   'online_count': 0, 'employees': []}
         groups.append(office)
         groups_by_id[None] = office
-    elif me.role != 'director' and me.department_id is None:
+    elif not is_executive(me) and me.department_id is None:
         office = {'department_id': None, 'department': 'الإدارة العامة', 'total_staff': 0,
                   'online_count': 0, 'employees': []}
         groups.append(office)
@@ -1262,7 +1273,7 @@ def dashboard(db:Session=Depends(get_db),s=Depends(require_login)):
 
 @app.get('/api/audit')
 def audit_logs(db:Session=Depends(get_db),s=Depends(require_login)):
-    if s.user.role!='director':raise HTTPException(403,'الصلاحية غير متاحة')
+    if not is_executive(s.user):raise HTTPException(403,'الصلاحية غير متاحة')
     return [{'action':a.action,'actor_id':a.actor_id,'details':a.details,'created_at':iso(a.created_at)} for a in db.scalars(select(Audit).order_by(Audit.id.desc()).limit(250))]
 
 # Internal mail: private on-platform messaging (no SMTP, no external emails).
