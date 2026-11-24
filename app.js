@@ -7,6 +7,7 @@ const fmt=dt=>dt?new Date(dt).toLocaleString('ar-SA',{dateStyle:'short',timeStyl
 const fdate=dt=>dt?new Date(dt+'T12:00:00').toLocaleDateString('ar-SA'):'—';
 const roles={director:'مدير عام الإدارة',advisor:'مستشار القطاع',head:'رئيس قسم',employee:'موظف'};
 const isExecutive=role=>role==='director'||role==='advisor';
+const affiliationLabel=u=>u.role==='advisor'?'وظيفة مستقلة على مستوى القطاع':(u.department||'الإدارة العامة');
 const statuses={new:'لم تبدأ',working:'قيد التنفيذ',review:'قيد المراجعة',revision:'بحاجة إلى تعديل',done:'معتمدة ومكتملة'};
 const priorities={high:'عالية',medium:'متوسطة',low:'منخفضة'};
 let toastTimer;
@@ -94,7 +95,7 @@ function renderLogin(){stopBackground();root.innerHTML=`<div class="login-shell"
  $('loginForm').onsubmit=request(async e=>{e.preventDefault();let fd=new FormData(e.currentTarget);let btn=e.currentTarget.querySelector('button');btn.disabled=true;try{let response=await api('/auth/login',{method:'POST',data:{email:fd.get('email'),password:fd.get('password')}});state.me=response.user;state.csrf=response.csrf;state.page='dashboard';state.noticeInitialized=false;await loadAll();startBackground();render();if(state.me.must_change_password)changePasswordModal(true)}catch(error){$('loginError').textContent=error.message}finally{btn.disabled=false}});
 }
 function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['audit','◈','سجل الإجراءات']].filter(x=>x[0]!=='audit'||isExecutive(state.me.role))}
-function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(m.department||'الإدارة العامة')}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
+function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
  document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{state.page=btn.dataset.page;state.selectedTask=null;render()});
  $('logoutBtn').onclick=request(async()=>{await api('/auth/logout',{method:'POST'});state.me=null;state.csrf=null;renderLogin()});
  $('changePwBtn').onclick=()=>changePasswordModal(false);$('changeEmailBtn').onclick=()=>changeEmailModal();$('notificationBell').onclick=()=>openNotificationCenter();
@@ -223,10 +224,10 @@ function renderEmployees(){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="employee">إلغاء دور المستشار</button>`);
     }
     const roleHint=executive&&occupied?`<small class="role-hint">رئيس القسم الحالي: ${safe(currentHead.name)} — يجب تحويله إلى موظف أولًا</small>`:'';
-    return `<div class="employee-row"><div><b>${safe(u.name)}</b><small>${safe(u.email)} · ${safe(u.department||'الإدارة العامة')} · ${safe(roles[u.role]||u.role)}</small>${roleHint}</div><div class="employee-actions"><span class="pill ${u.active?'done':'offline'}">${u.active?'نشط':'موقوف'}</span>${canEdit?`<button class="btn secondary small" data-edit-user="${u.id}">تعديل</button>`:''}${buttons.join('')}</div></div>`;
+    return `<div class="employee-row"><div><b>${safe(u.name)}</b><small>${safe(u.email)} · ${safe(affiliationLabel(u))} · ${safe(roles[u.role]||u.role)}</small>${roleHint}</div><div class="employee-actions"><span class="pill ${u.active?'done':'offline'}">${u.active?'نشط':'موقوف'}</span>${canEdit?`<button class="btn secondary small" data-edit-user="${u.id}">تعديل</button>`:''}${buttons.join('')}</div></div>`;
   }).join('');
-  const managementNote=director?`<div class="note" style="margin-bottom:14px"><b>الأدوار:</b> يمكن تعيين «مستشار القطاع» من الموظفين، أو إنشاء حساب جديد بهذا الدور. للمستشار الصلاحيات التنفيذية العامة باستثناء إضافة حسابات الموظفين أو الاستيراد من Excel. تعيين المستشار أو إلغاء دوره متاح للمدير العام فقط. وعند تغيير رئيس القسم يجب تحويله إلى موظف أولًا قبل تعيين البديل.</div>`:
-    advisor?`<div class="note" style="margin-bottom:14px"><b>صلاحيات مستشار القطاع:</b> متابعة جميع الأقسام والمهام والتقارير وإدارة الصلاحيات التنفيذية للموظفين ورؤساء الأقسام. <b>إضافة الحسابات الجديدة والاستيراد من Excel غير مسموحين</b>، ولا يمكن للمستشار تعيين مستشار آخر أو تغيير صلاحياته.</div>`:'';
+  const managementNote=director?`<div class="note" style="margin-bottom:14px"><b>الأدوار:</b> مستشار القطاع وظيفة مستقلة ولا يتبع أي قسم. يمكن تعيينه من الموظفين، أو إنشاء حساب جديد بهذا الدور دون اختيار قسم. للمستشار الصلاحيات التنفيذية العامة باستثناء إضافة حسابات الموظفين أو الاستيراد من Excel. تعيين المستشار أو إلغاء دوره متاح للمدير العام فقط. وعند تغيير رئيس القسم يجب تحويله إلى موظف أولًا قبل تعيين البديل.</div>`:
+    advisor?`<div class="note" style="margin-bottom:14px"><b>صلاحيات مستشار القطاع:</b> وظيفة مستقلة لا تتبع قسمًا، وتشمل متابعة جميع الأقسام والمهام والتقارير وإدارة الصلاحيات التنفيذية للموظفين ورؤساء الأقسام. <b>إضافة الحسابات الجديدة والاستيراد من Excel غير مسموحين</b>، ولا يمكن للمستشار تعيين مستشار آخر أو تغيير صلاحياته.</div>`:'';
   renderShell('الموظفون والأقسام',`<div class="page-head"><div><h2>سجل الموظفين</h2><p>عرض الأقسام والأدوار وحسابات الموظفين وفق الصلاحيات المعتمدة.</p></div>${canAdd?`<div class="action-row" style="margin:0">${director?'<button class="btn secondary" id="importUsers">⇧ استيراد من Excel</button>':''}<button class="btn" id="newUser">＋ إضافة موظف</button></div>`:''}</div>${managementNote}<div class="panel">${rows||'<div class="empty">لا يوجد موظفون</div>'}</div><p class="footer-note">يُحتفظ بالمهام والمراسلات والملفات السابقة بعد تغيير الصلاحية. تُلغى الجلسات النشطة للمستخدم عند تغيير دوره.</p>`);
   if($('newUser'))$('newUser').onclick=()=>userForm();
   if($('importUsers'))$('importUsers').onclick=()=>importEmployeesModal();
@@ -245,11 +246,16 @@ function changeRoleModal(user,newRole){
   const occupant=state.users.find(u=>u.role==='head'&&u.department_id===user.department_id&&u.id!==user.id);
   if(newRole==='head'&&occupant){toast('يجب تحويل رئيس القسم الحالي إلى موظف أولًا');return}
   if(['head','advisor'].includes(newRole)&&!user.active){toast('يجب تفعيل حساب الموظف أولًا');return}
-  modal('تغيير صلاحية المستخدم',`<form id="roleChangeForm" class="form-stack"><div class="note">المستخدم: <b>${safe(user.name)}</b><br>القسم: <b>${safe(user.department||'الإدارة العامة')}</b><br>الدور الحالي: <b>${safe(roles[user.role]||user.role)}</b><br>الدور الجديد: <b>${safe(roles[newRole])}</b></div><p class="hint">سيتم إنهاء جميع جلسات المستخدم النشطة ويلزمه تسجيل الدخول من جديد. لا تتأثر مهامه أو مراسلاته السابقة. ${newRole==='advisor'?'مستشار القطاع لديه صلاحيات المدير العام باستثناء إنشاء حسابات الموظفين واستيرادهم من Excel.':'لا يمكن تعيين رئيسين للقسم نفسه.'}</p><div class="action-row"><button type="submit" class="btn">تأكيد تغيير الصلاحية</button><button type="button" class="btn secondary" id="cancelRoleChange">إلغاء</button></div></form>`);
+  const returnsToDepartment = user.role==='advisor' && newRole==='employee';
+  const departmentsList = state.departments.map(d=>`<option value="${d.id}">${safe(d.name)}</option>`).join('');
+  modal('تغيير صلاحية المستخدم',`<form id="roleChangeForm" class="form-stack"><div class="note">المستخدم: <b>${safe(user.name)}</b><br>الارتباط التنظيمي الحالي: <b>${safe(affiliationLabel(user))}</b><br>الدور الحالي: <b>${safe(roles[user.role]||user.role)}</b><br>الدور الجديد: <b>${safe(roles[newRole])}</b></div>${returnsToDepartment?`<label class="form-field">القسم عند العودة إلى دور موظف<select id="advisorReturnDepartment" class="input" required><option value="">اختر القسم</option>${departmentsList}</select></label>`:''}<p class="hint">سيتم إنهاء جميع جلسات المستخدم النشطة ويلزمه تسجيل الدخول من جديد. لا تتأثر المهام أو المراسلات السابقة. ${newRole==='advisor'?'يُزال ارتباط المستشار بأي قسم، ويصبح وظيفة مستقلة على مستوى القطاع مع الصلاحيات التنفيذية دون إضافة الموظفين.':returnsToDepartment?'يجب اختيار القسم الذي سيعمل فيه بعد سحب دور المستشار.':'لا يمكن تعيين رئيسين للقسم نفسه.'}</p><div class="action-row"><button type="submit" class="btn">تأكيد تغيير الصلاحية</button><button type="button" class="btn secondary" id="cancelRoleChange">إلغاء</button></div></form>`);
   $('cancelRoleChange').onclick=closeModal;
   $('roleChangeForm').onsubmit=request(async e=>{
-    e.preventDefault();const btn=e.currentTarget.querySelector('[type=submit]');btn.disabled=true;
-    try{await api(`/users/${user.id}/role`,{method:'PATCH',data:{role:newRole}});closeModal();await loadAll();renderEmployees();toast(`تم تغيير صلاحية ${user.name} إلى ${roles[newRole]}`)}
+    e.preventDefault();
+    const department=returnsToDepartment?Number($('advisorReturnDepartment').value):null;
+    if(returnsToDepartment&&!department)throw Error('حدد القسم قبل تحويل مستشار القطاع إلى موظف');
+    const btn=e.currentTarget.querySelector('[type=submit]');btn.disabled=true;
+    try{await api(`/users/${user.id}/role`,{method:'PATCH',data:{role:newRole,...(returnsToDepartment?{department_id:department}:{})}});closeModal();await loadAll();renderEmployees();toast(`تم تغيير صلاحية ${user.name} إلى ${roles[newRole]}`)}
     finally{btn.disabled=false}
   });
 }
@@ -266,7 +272,7 @@ function importEmployeesModal(){
   if(state.me.role!=='director'){toast('الاستيراد الجماعي متاح للمدير العام فقط');return}
   const ds=state.departments;
   modal('استيراد الموظفين من Excel',`<div class="note">تستطيع استيراد 100 موظف في كل ملف Excel بصيغة XLSX. الحقول الإلزامية: اسم الموظف، البريد الإلكتروني، كلمة المرور، الدور. عمود «القسم» اختياري عند تحديد قسم افتراضي أدناه.</div>
-  <p class="hint">الأدوار المتاحة للاستيراد: موظف ورئيس قسم ومستشار القطاع. لا يمكن تعيين رئيس ثانٍ لأي قسم؛ يجب تحويل الرئيس الحالي إلى موظف أولًا. جميع كلمات المرور مؤقتة، ويجب تغييرها عند تسجيل الدخول الأول.</p>
+  <p class="hint">الأدوار المتاحة للاستيراد: موظف ورئيس قسم ومستشار القطاع. مستشار القطاع لا يتبع أي قسم، ويمكن ترك عمود القسم فارغًا له. لا يمكن تعيين رئيس ثانٍ لأي قسم؛ يجب تحويل الرئيس الحالي إلى موظف أولًا. جميع كلمات المرور مؤقتة، ويجب تغييرها عند تسجيل الدخول الأول.</p>
   <div class="action-row" style="margin:0 0 14px"><a class="btn secondary" href="/api/users/import/template" download="enjaz_employees_template.xlsx">↓ تحميل قالب Excel</a></div>
   <form id="bulkImportForm" class="form-stack">
     <label class="form-field">ملف الموظفين (.xlsx فقط وبحد أقصى 2 ميجابايت)<input id="bulkFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="input" required></label>
@@ -295,7 +301,52 @@ function importEmployeesModal(){
     finally{previewBtn.disabled=false}});
 }
 
-function userForm(u){const fresh=!u;if(fresh&&!['director','head'].includes(state.me.role)){toast('إضافة الموظفين غير متاحة لمستشار القطاع');return}const ds=state.departments.filter(d=>isExecutive(state.me.role)||state.me.department_id===d.id);modal(fresh?'إضافة موظف وحساب دخول':'تعديل الموظف',`<form id="userForm" class="form-stack"><div class="form-grid">${field('full_name','اسم الموظف','text',u?.name||'','required maxlength="160"')}${fresh?field('email','البريد الإلكتروني','email','','required'):''}<label class="form-field">القسم<select name="department_id" class="input" ${(!fresh&&!isExecutive(state.me.role))?'disabled':''}>${ds.map(d=>`<option value="${d.id}" ${u?.department_id===d.id?'selected':''}>${safe(d.name)}</option>`).join('')}</select></label>${fresh&&state.me.role==='director'?'<label class="form-field">الدور<select name="role" class="input"><option value="employee">موظف</option><option value="head">رئيس قسم</option><option value="advisor">مستشار القطاع</option></select></label>':''}${field('temporary_password',fresh?'كلمة مرور مؤقتة (12 حرفًا أو أكثر)':'إعادة تعيين كلمة المرور (اختياري)','password','','minlength="12" autocomplete="new-password" '+(fresh?'required':''))}${!fresh?'<label class="form-field">حالة الحساب<select name="active" class="input"><option value="true" '+(u.active?'selected':'')+'>نشط</option><option value="false" '+(!u.active?'selected':'')+'>موقوف</option></select></label>':''}</div><p class="hint">يُطلب من الموظف تغيير كلمة المرور المؤقتة عند تسجيل الدخول لأول مرة. لتغيير صلاحية موظف موجود استخدم زر تغيير الصلاحية في قائمة الموظفين. ولا يمكن إنشاء رئيس ثانٍ لقسم لديه رئيس بالفعل.</p><button class="btn" type="submit">حفظ</button></form>`);$('userForm').onsubmit=request(async e=>{e.preventDefault();const data=new FormData(e.currentTarget);let payload={full_name:data.get('full_name')};if(fresh){payload.email=data.get('email');payload.department_id=Number(data.get('department_id'));payload.role=data.get('role')||'employee';payload.temporary_password=data.get('temporary_password');await api('/users',{method:'POST',data:payload})}else{if(isExecutive(state.me.role))payload.department_id=Number(data.get('department_id'));payload.active=data.get('active')==='true';if(data.get('temporary_password'))payload.temporary_password=data.get('temporary_password');await api('/users/'+u.id,{method:'PATCH',data:payload})}closeModal();await loadAll();render();toast('تم حفظ بيانات الموظف')});}
+function userForm(u){
+  const fresh=!u;
+  if(fresh&&!['director','head'].includes(state.me.role)){
+    toast('إضافة الموظفين غير متاحة لمستشار القطاع');return;
+  }
+  const ds=state.departments.filter(d=>isExecutive(state.me.role)||state.me.department_id===d.id);
+  const advisorEdit=!fresh&&u.role==='advisor';
+  const deptOptions=ds.map(d=>`<option value="${d.id}" ${u?.department_id===d.id?'selected':''}>${safe(d.name)}</option>`).join('');
+  const deptField=advisorEdit?
+    `<div class="form-field"><b>الارتباط التنظيمي</b><p class="hint">مستشار القطاع — وظيفة مستقلة على مستوى القطاع، ولا يتبع أي قسم.</p></div>`:
+    `<label class="form-field" id="newUserDepartmentField">القسم<select name="department_id" id="newUserDepartment" class="input" ${(!fresh&&!isExecutive(state.me.role))?'disabled':''}>${deptOptions}</select></label>`;
+  const roleField=fresh&&state.me.role==='director'?
+    `<label class="form-field">الدور<select name="role" id="newUserRole" class="input"><option value="employee">موظف</option><option value="head">رئيس قسم</option><option value="advisor">مستشار القطاع</option></select></label>`:'';
+  modal(fresh?'إضافة مستخدم وحساب دخول':'تعديل المستخدم',
+    `<form id="userForm" class="form-stack"><div class="form-grid">${field('full_name','اسم المستخدم','text',u?.name||'','required maxlength="160"')}${fresh?field('email','البريد الإلكتروني','email','','required'):''}${deptField}${roleField}${field('temporary_password',fresh?'كلمة مرور مؤقتة (12 حرفًا أو أكثر)':'إعادة تعيين كلمة المرور (اختياري)','password','','minlength="12" autocomplete="new-password" '+(fresh?'required':''))}${!fresh?'<label class="form-field">حالة الحساب<select name="active" class="input"><option value="true" '+(u.active?'selected':'')+'>نشط</option><option value="false" '+(!u.active?'selected':'')+'>موقوف</option></select></label>':''}</div><p class="hint" id="newUserHelp">يُطلب من المستخدم تغيير كلمة المرور المؤقتة عند أول دخول. دور مستشار القطاع وظيفة مستقلة ولا يحتاج قسمًا. لتغيير صلاحية مستخدم موجود استخدم زر تغيير الصلاحية في القائمة.</p><button class="btn" type="submit">حفظ</button></form>`);
+  if(fresh&&$('newUserRole')){
+    const syncDepartment=()=>{
+      const independent=$('newUserRole').value==='advisor';
+      $('newUserDepartmentField').hidden=independent;
+      $('newUserDepartment').disabled=independent;
+      $('newUserHelp').textContent=independent?
+        'مستشار القطاع وظيفة مستقلة لا تتبع أي قسم، وله صلاحيات المدير العام باستثناء إضافة الحسابات، ويمكن تعيينه من المدير العام فقط.':
+        'الموظف ورئيس القسم يرتبطان بقسم. لا يمكن تعيين رئيسين للقسم نفسه.';
+    };
+    $('newUserRole').addEventListener('change',syncDepartment);
+    syncDepartment();
+  }
+  $('userForm').onsubmit=request(async e=>{
+    e.preventDefault();const data=new FormData(e.currentTarget);
+    let payload={full_name:data.get('full_name')};
+    if(fresh){
+      payload.email=data.get('email');
+      payload.role=data.get('role')||'employee';
+      payload.department_id=payload.role==='advisor'?null:Number(data.get('department_id'));
+      payload.temporary_password=data.get('temporary_password');
+      await api('/users',{method:'POST',data:payload});
+    }else{
+      if(isExecutive(state.me.role)&&!advisorEdit)payload.department_id=Number(data.get('department_id'));
+      payload.active=data.get('active')==='true';
+      if(data.get('temporary_password'))payload.temporary_password=data.get('temporary_password');
+      await api('/users/'+u.id,{method:'PATCH',data:payload});
+    }
+    closeModal();await loadAll();render();toast('تم حفظ بيانات المستخدم');
+  });
+}
+
 function changeEmailModal(){
  modal('تغيير البريد الإلكتروني',`<p class="note">البريد الإلكتروني هو اسم الدخول إلى المنصة. لن تُرسل أي رسائل أو رموز تحقق إلى البريد الخارجي، ويلزم إدخال كلمة المرور الحالية لتأكيد التغيير.</p><form id="changeEmailForm" class="form-stack"><div class="form-field"><label>البريد الحالي</label><input class="input" value="${safe(state.me.email)}" disabled></div>${field('new_email','البريد الإلكتروني الجديد','email','','required maxlength="200" autocomplete="email"')}${field('current_password','كلمة المرور الحالية للتأكيد','password','','required autocomplete="current-password"')}<button class="btn" type="submit">حفظ البريد الجديد</button></form>`);
  $('changeEmailForm').onsubmit=request(async e=>{e.preventDefault();const btn=e.currentTarget.querySelector('button');btn.disabled=true;try{const f=new FormData(e.currentTarget);const r=await api('/me/email',{method:'PATCH',data:{new_email:f.get('new_email'),current_password:f.get('current_password')}});state.me=r.user;closeModal();render();toast('تم تحديث البريد الإلكتروني. استخدم البريد الجديد في تسجيل الدخول القادم.')}finally{btn.disabled=false}});

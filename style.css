@@ -100,3 +100,6 @@
 .notice-item b{font-size:13px;color:var(--green)}.notice-item span{font-size:13px}.notice-item small{font-size:11px;color:var(--muted)}
 .task-discussion{height:min(49vh,370px);margin-bottom:12px}
 @media(max-width:540px){.notice-summary{flex-direction:column}.notice-bell{font-size:11px}}
+
+/* The adviser creation form hides department selection entirely. */
+[hidden]{display:none!important}
