@@ -50,6 +50,7 @@ COOKIE_NAME = '__Host-enjaz_session' if IS_PROD else 'enjaz_session'
 SESSION_SECONDS = 12 * 60 * 60
 ONLINE_WINDOW_SECONDS = 75
 EXECUTIVE_ROLES = ('director', 'advisor')
+GENERAL_MANAGEMENT_NAME = 'الإدارة العامة'
 
 def is_executive(user):
     return user.role in EXECUTIVE_ROLES
@@ -231,6 +232,17 @@ def bootstrap():
                 print('ENJAZ: administrator account provisioned; remove bootstrap environment secrets', flush=True)
             else:
                 print('ENJAZ: no users; configure BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD (14+ chars)', flush=True)
+        # Preserve existing department IDs: add the general management unit only if
+        # it does not exist. It is for staff affiliation, not for the independent adviser.
+        if not db.scalar(select(Department.id).where(Department.name == GENERAL_MANAGEMENT_NAME)):
+            db.add(Department(name=GENERAL_MANAGEMENT_NAME))
+            try:
+                db.commit()
+                print('ENJAZ: general management unit registered', flush=True)
+            except IntegrityError:
+                db.rollback()  # Another instance may have registered it concurrently.
+                if not db.scalar(select(Department.id).where(Department.name == GENERAL_MANAGEMENT_NAME)):
+                    raise
         # Data repair for accounts created by older versions: sector advisers are
         # independent of departments. Keep their prior task and message history.
         legacy_advisers = db.scalars(select(User).where(
@@ -488,6 +500,8 @@ def require_free_department_head(db: Session, department_id: int):
     dept = db.scalar(select(Department).where(Department.id == department_id).with_for_update())
     if not dept:
         raise HTTPException(400, 'القسم المحدد غير موجود')
+    if dept.name == GENERAL_MANAGEMENT_NAME:
+        raise HTTPException(400, 'الإدارة العامة ارتباط تنظيمي مستقل، وليست قسمًا يُعين له رئيس قسم')
     current = db.scalar(select(User).where(User.department_id == department_id,
                                            User.role == 'head').order_by(User.id).limit(1))
     if current:
@@ -517,14 +531,21 @@ def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get
         raise HTTPException(409, 'يجب تحويل رئيس القسم إلى موظف أولًا قبل تعيينه مستشارًا للقطاع')
     if target.role == 'advisor' and data.role == 'head':
         raise HTTPException(409, 'يجب تحويل مستشار القطاع إلى موظف أولًا قبل تعيينه رئيسًا للقسم')
-    # An adviser has no department. Demoting them to employee requires an
-    # explicit new department; other role changes preserve their current one.
+    # A sector adviser remains independent (NULL department). Returning the
+    # person to employee requires an organisational affiliation: use the
+    # department explicitly chosen in the dialog, or default to general
+    # management when older clients omit department_id. Never overwrite a valid
+    # explicit selection, and reject nonexistent department IDs below.
     if target.role == 'advisor':
         if data.role != 'employee':
             raise HTTPException(409, 'يجب تحويل مستشار القطاع إلى موظف أولًا')
         if data.department_id is None:
-            raise HTTPException(400, 'حدد القسم عند تحويل مستشار القطاع إلى موظف')
-        new_department_id = data.department_id
+            general = db.scalar(select(Department).where(Department.name == GENERAL_MANAGEMENT_NAME))
+            if general is None:
+                raise HTTPException(409, 'وحدة الإدارة العامة غير مسجلة؛ أعد تشغيل التطبيق')
+            new_department_id = general.id
+        else:
+            new_department_id = data.department_id
     else:
         if not target.department_id:
             raise HTTPException(400, 'يجب أن يكون الموظف مرتبطًا بقسم لتغيير دوره')
@@ -702,6 +723,8 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
             dept = None if role == 'advisor' else (departments_by_name.get(department_text) if department_text else default_dept)
             if role != 'advisor' and not dept:
                 row_errors.append('القسم غير موجود أو لم يتم اختيار قسم افتراضي')
+            if role == 'head' and dept and dept.name == GENERAL_MANAGEMENT_NAME:
+                row_errors.append('الإدارة العامة ليست قسمًا ولا يمكن تعيين رئيس قسم لها')
             if row_errors:
                 errors.append({'row':rownum, 'message':'؛ '.join(row_errors)})
             else:
@@ -1263,15 +1286,15 @@ def presence(db: Session = Depends(get_db), s = Depends(require_login)):
     groups = [{'department_id': d.id, 'department': d.name, 'total_staff': 0,
                'online_count': 0, 'employees': []} for d in departments]
     groups_by_id = {group['department_id']: group for group in groups}
-    if is_executive(me) and any(u.department_id is None and u.role != 'advisor' for u in visible_users):
-        office = {'department_id': None, 'department': 'الإدارة العامة', 'total_staff': 0,
-                  'online_count': 0, 'employees': []}
-        groups.append(office)
-        groups_by_id[None] = office
-    elif not is_executive(me) and me.department_id is None:
-        office = {'department_id': None, 'department': 'الإدارة العامة', 'total_staff': 0,
-                  'online_count': 0, 'employees': []}
-        groups.append(office)
+    # Directors have no formal department_id. Include their presence in the
+    # 'الإدارة العامة' unit without making the director an employee of it, and
+    # without showing two duplicate cards for that name.
+    if any(u.department_id is None and u.role != 'advisor' for u in visible_users):
+        office = next((g for g in groups if g['department'] == GENERAL_MANAGEMENT_NAME), None)
+        if office is None:
+            office = {'department_id': None, 'department': GENERAL_MANAGEMENT_NAME, 'total_staff': 0,
+                      'online_count': 0, 'employees': []}
+            groups.append(office)
         groups_by_id[None] = office
 
     # Sector advisers appear in their own stand-alone card, not in a

@@ -212,11 +212,12 @@ function renderEmployees(){
   const rows=all.map(u=>{
     const currentHead=heads.get(u.department_id);
     const occupied=u.role==='employee'&&!!currentHead;
+    const nonSection=u.department==='الإدارة العامة';
     const canEdit=executive?u.role!=='director'&&(director||u.role!=='advisor'):
       state.me.role==='head'&&u.role==='employee'&&u.department_id===state.me.department_id;
     const buttons=[];
     if(executive&&u.role==='employee'){
-      buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="head" ${occupied||!u.active?'disabled':''} title="${occupied?'يجب تحويل رئيس القسم الحالي إلى موظف أولًا':!u.active?'يلزم تفعيل الحساب قبل الترقية':'تعيين رئيس قسم'}">تعيين رئيس قسم</button>`);
+      buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="head" ${occupied||nonSection||!u.active?'disabled':''} title="${nonSection?'الإدارة العامة ارتباط تنظيمي وليست قسمًا له رئيس':occupied?'يجب تحويل رئيس القسم الحالي إلى موظف أولًا':!u.active?'يلزم تفعيل الحساب قبل الترقية':'تعيين رئيس قسم'}">تعيين رئيس قسم</button>`);
       if(director)buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="advisor" ${!u.active?'disabled':''}>تعيين مستشار القطاع</button>`);
     }else if(executive&&u.role==='head'){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="employee">تحويل إلى موظف</button>`);
@@ -243,19 +244,28 @@ function changeRoleModal(user,newRole){
   if(user.role===newRole){toast('الدور الحالي مطابق للدور المطلوب');return}
   if(user.role==='head'&&newRole==='advisor'){toast('حوّل رئيس القسم إلى موظف أولًا');return}
   if(user.role==='advisor'&&newRole==='head'){toast('حوّل المستشار إلى موظف أولًا');return}
+  if(newRole==='head'&&user.department==='الإدارة العامة'){toast('لا يمكن تعيين رئيس قسم للإدارة العامة');return}
   const occupant=state.users.find(u=>u.role==='head'&&u.department_id===user.department_id&&u.id!==user.id);
   if(newRole==='head'&&occupant){toast('يجب تحويل رئيس القسم الحالي إلى موظف أولًا');return}
   if(['head','advisor'].includes(newRole)&&!user.active){toast('يجب تفعيل حساب الموظف أولًا');return}
   const returnsToDepartment = user.role==='advisor' && newRole==='employee';
-  const departmentsList = state.departments.map(d=>`<option value="${d.id}">${safe(d.name)}</option>`).join('');
-  modal('تغيير صلاحية المستخدم',`<form id="roleChangeForm" class="form-stack"><div class="note">المستخدم: <b>${safe(user.name)}</b><br>الارتباط التنظيمي الحالي: <b>${safe(affiliationLabel(user))}</b><br>الدور الحالي: <b>${safe(roles[user.role]||user.role)}</b><br>الدور الجديد: <b>${safe(roles[newRole])}</b></div>${returnsToDepartment?`<label class="form-field">القسم عند العودة إلى دور موظف<select id="advisorReturnDepartment" class="input" required><option value="">اختر القسم</option>${departmentsList}</select></label>`:''}<p class="hint">سيتم إنهاء جميع جلسات المستخدم النشطة ويلزمه تسجيل الدخول من جديد. لا تتأثر المهام أو المراسلات السابقة. ${newRole==='advisor'?'يُزال ارتباط المستشار بأي قسم، ويصبح وظيفة مستقلة على مستوى القطاع مع الصلاحيات التنفيذية دون إضافة الموظفين.':returnsToDepartment?'يجب اختيار القسم الذي سيعمل فيه بعد سحب دور المستشار.':'لا يمكن تعيين رئيسين للقسم نفسه.'}</p><div class="action-row"><button type="submit" class="btn">تأكيد تغيير الصلاحية</button><button type="button" class="btn secondary" id="cancelRoleChange">إلغاء</button></div></form>`);
+  const generalDepartment=state.departments.find(d=>d.name.trim()==='الإدارة العامة');
+  // Put general management first and select it by default. Other departments
+  // remain available and their explicit IDs must be forwarded unchanged.
+  const orderedDepartments=[...state.departments].sort((a,b)=>
+    (a.name.trim()==='الإدارة العامة'?-1:b.name.trim()==='الإدارة العامة'?1:0));
+  const departmentsList=orderedDepartments.map(d=>`<option value="${d.id}" ${d.id===generalDepartment?.id?'selected':''}>${safe(d.name)}</option>`).join('');
+  modal('تغيير صلاحية المستخدم',`<form id="roleChangeForm" class="form-stack"><div class="note">المستخدم: <b>${safe(user.name)}</b><br>الارتباط التنظيمي الحالي: <b>${safe(affiliationLabel(user))}</b><br>الدور الحالي: <b>${safe(roles[user.role]||user.role)}</b><br>الدور الجديد: <b>${safe(roles[newRole])}</b></div>${returnsToDepartment?`<label class="form-field">الارتباط التنظيمي بعد إلغاء دور المستشار<select id="advisorReturnDepartment" name="department_id" class="input" required>${departmentsList}</select><small class="hint">«الإدارة العامة» محددة افتراضيًا؛ ويمكنك اختيار أي قسم آخر. لن يتغير ارتباط الموظف بعد التأكيد إلا وفق اختيارك.</small></label>`:''}<p class="hint">سيتم إنهاء جميع جلسات المستخدم النشطة ويلزمه تسجيل الدخول من جديد. لا تتأثر المهام أو المراسلات السابقة. ${newRole==='advisor'?'يُزال ارتباط المستشار بأي قسم، ويصبح وظيفة مستقلة على مستوى القطاع مع الصلاحيات التنفيذية دون إضافة الموظفين.':returnsToDepartment?'يجب اختيار القسم الذي سيعمل فيه بعد سحب دور المستشار.':'لا يمكن تعيين رئيسين للقسم نفسه.'}</p><div class="action-row"><button type="submit" class="btn">تأكيد تغيير الصلاحية</button><button type="button" class="btn secondary" id="cancelRoleChange">إلغاء</button></div></form>`);
   $('cancelRoleChange').onclick=closeModal;
   $('roleChangeForm').onsubmit=request(async e=>{
     e.preventDefault();
-    const department=returnsToDepartment?Number($('advisorReturnDepartment').value):null;
-    if(returnsToDepartment&&!department)throw Error('حدد القسم قبل تحويل مستشار القطاع إلى موظف');
+    const formData=new FormData(e.currentTarget);
+    const selectedDepartment=formData.get('department_id');
+    const department=returnsToDepartment?Number(selectedDepartment):null;
+    if(returnsToDepartment&&(!Number.isInteger(department)||department<1||
+       !state.departments.some(d=>d.id===department)))throw Error('اختر ارتباطًا تنظيميًا صحيحًا قبل إلغاء دور المستشار');
     const btn=e.currentTarget.querySelector('[type=submit]');btn.disabled=true;
-    try{await api(`/users/${user.id}/role`,{method:'PATCH',data:{role:newRole,...(returnsToDepartment?{department_id:department}:{})}});closeModal();await loadAll();renderEmployees();toast(`تم تغيير صلاحية ${user.name} إلى ${roles[newRole]}`)}
+    try{const updated=await api(`/users/${user.id}/role`,{method:'PATCH',data:{role:newRole,...(returnsToDepartment?{department_id:department}:{})}});closeModal();await loadAll();renderEmployees();toast(`تم تغيير صلاحية ${user.name} إلى ${roles[newRole]}${returnsToDepartment?' — '+(updated.user.department||'الإدارة العامة'):''}`)}
     finally{btn.disabled=false}
   });
 }
@@ -336,6 +346,7 @@ function userForm(u){
       payload.role=data.get('role')||'employee';
       payload.department_id=payload.role==='advisor'?null:Number(data.get('department_id'));
       payload.temporary_password=data.get('temporary_password');
+      if(payload.role==='head'&&state.departments.some(d=>d.id===payload.department_id&&d.name==='الإدارة العامة'))throw Error('الإدارة العامة جهة تنظيمية، اختر قسمًا فعليًا عند إنشاء رئيس قسم');
       await api('/users',{method:'POST',data:payload});
     }else{
       if(isExecutive(state.me.role)&&!advisorEdit)payload.department_id=Number(data.get('department_id'));
