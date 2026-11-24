@@ -46,6 +46,38 @@ async function uploadTaskFiles(taskId,files,category){
   }
   return completed;
 }
+const commFileTypes=attachmentTypes;
+const commMaxFileSize=5*1024*1024;
+function sharedPicker(){return `<label class="shared-picker">📎 إرفاق صورة أو ملف (حتى 3 ملفات، 5 ميجابايت للملف)<input type="file" name="files" accept="${commFileTypes}" multiple></label>`}
+function validateSharedSelection(form){
+ const files=Array.from(form.querySelector('input[name="files"]')?.files||[]);
+ if(files.length>3)throw Error('يمكن إرفاق 3 ملفات في كل رسالة بحد أقصى');
+ if(files.some(f=>f.size>commMaxFileSize||f.size===0))throw Error('يجب ألا يزيد حجم الملف عن 5 ميجابايت وألا يكون فارغًا');
+ const allowed=['pdf','docx','xlsx','pptx','png','jpg','jpeg','txt','csv'];
+ if(files.some(f=>!allowed.includes((f.name.split('.').pop()||'').toLowerCase())))throw Error('صيغة أحد المرفقات غير مسموحة');
+ return files;
+}
+async function sendSharedForm(path,formData){
+ let r;try{r=await fetch('/api'+path,{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':state.csrf||''},body:formData})}
+ catch{throw Error('تعذّر الاتصال بالخادم أثناء رفع المرفقات')}
+ const data=await r.json().catch(()=>({}));
+ if(r.status===401){state.me=null;stopBackground();renderLogin();throw Error('انتهت الجلسة. يرجى تسجيل الدخول')}
+ if(!r.ok)throw Error(data.detail||'فشل إرسال الرسالة والمرفقات');
+ return data;
+}
+function sharedAttachmentHtml(items,kind){
+ if(!items?.length)return '';
+ const base=kind==='chat'?'/api/messages/attachments/':'/api/inbox/attachments/';
+ return `<div class="shared-attachments">${items.map(a=>{const url=base+Number(a.id);
+  return `<div class="shared-item">${a.is_image?`<a href="${url}" target="_blank" rel="noopener" aria-label="عرض الصورة ${safe(a.filename)}"><img src="${url}?inline=true" alt="${safe(a.filename)}" loading="lazy"></a>`:''}<a class="shared-file-link" href="${url}" download>📎 ${safe(a.filename)} <small>(${fileSize(a.size_bytes)})</small></a></div>`}).join('')}</div>`
+}
+function chatMessageHtml(m){return `<div class="message ${m.sender_id===state.me.id?'own':''} ${m.deleted?'moderated':''}"><strong>${safe(m.sender)}</strong><div>${safe(m.text)}</div>${!m.deleted?sharedAttachmentHtml(m.attachments,'chat'):''}<div class="message-bottom"><time>${fmt(m.created_at)}</time>${m.can_moderate?`<button type="button" class="chat-remove" data-remove-message="${m.id}" title="حذف رسالة مخالفة">حذف المخالفة</button>`:''}</div></div>`}
+function bindChatModeration(root,refresh){if(!root)return;root.querySelectorAll('[data-remove-message]').forEach(btn=>btn.onclick=request(async()=>{
+ const reason=window.prompt('سبب حذف الرسالة المخالفة (يُحفظ في سجل التدقيق):');
+ if(reason===null)return;if(reason.trim().length<3)throw Error('اكتب سبب الحذف بثلاثة أحرف على الأقل');
+ if(!window.confirm('هل تريد حجب هذه الرسالة ومرفقاتها عن المشاركين؟'))return;
+ btn.disabled=true;try{await api('/messages/'+Number(btn.dataset.removeMessage),{method:'DELETE',data:{reason:reason.trim()}});await refresh();toast('تم حجب الرسالة وحفظ قرار الحذف')}finally{btn.disabled=false}
+ }))}
 function fileSize(n){return n<1024*1024?(n/1024).toFixed(0)+' ك.ب':(n/1024/1024).toFixed(1)+' م.ب'}
 async function populateAttachments(taskId){
   const target=$('taskAttachments');if(!target)return;
@@ -55,7 +87,7 @@ async function populateAttachments(taskId){
     active.innerHTML=items.length?items.map(a=>`<div class="attach-item"><div><b>${safe(a.filename)}</b><small>${a.category==='instruction'?'ملف توجيهات':'مرفق إنجاز'} · ${safe(a.uploader)} · ${fmt(a.uploaded_at)} · ${fileSize(a.size_bytes)}</small></div><a class="btn secondary small" href="/api/tasks/${taskId}/attachments/${a.id}/download" download>تنزيل</a></div>`).join(''):'<p class="hint">لا توجد مرفقات لهذه المهمة بعد.</p>';
   }catch(e){const el=$('taskAttachments');if(el)el.innerHTML=`<p class="error">${safe(e.message)}</p>`}
 }
-function request(fn){return async(...args)=>{try{await fn(...args)}catch(e){toast(e.message||'حدث خطأ')}}}
+function request(fn){return async(...rgs)=>{try{await fn(...rgs)}catch(e){toast(e.message||'حدث خطأ')}}}
 async function init(){try{const data=await api('/me');state.me=data.user;state.csrf=data.csrf;await loadAll();startBackground();render()}catch(e){renderLogin()}}
 async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications')]);Object.assign(state,{users,departments,tasks,dashboard,presence,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});}
 const noticeKinds={assigned:'تكليف جديد',review:'مهمة مكتملة تنتظر المراجعة',completed:'تم اعتماد المهمة واكتمالها',revision:'أُعيدت المهمة للتعديل',cancelled:'تم إلغاء التكليف'};
@@ -175,7 +207,7 @@ async function refreshMessages(){try{
  state.messages=msgs;
  if(state.page==='chat'&&$('messageList')){
    const list=$('messageList'),near=list.scrollHeight-list.scrollTop-list.clientHeight<85;
-   list.innerHTML=msgs.map(m=>`<div class="message ${m.sender_id===state.me.id?'own':''}"><strong>${safe(m.sender)}</strong>${safe(m.text)}<time>${fmt(m.created_at)}</time></div>`).join('')||'<div class="empty">لا توجد رسائل في هذه المحادثة</div>';
+   list.innerHTML=msgs.map(chatMessageHtml).join('')||'<div class="empty">لا توجد رسائل في هذه المحادثة</div>';bindChatModeration(list,refreshMessages);
    if(near)list.scrollTop=list.scrollHeight;
    if(msgs.length)await api('/messages/read',{method:'POST',data:{channel:currentChannel,last_id:msgs[msgs.length-1].id}});
    await pollNotifications(true);
@@ -184,23 +216,23 @@ async function refreshMessages(){try{
 async function taskDiscussionModal(taskId){
  const task=state.tasks.find(t=>t.id===taskId);if(!task)return;
  const channel='task:'+task.id;
- modal('مناقشة التكليف',`<p class="note">محادثة خاصة مستمرة بين مصدر التكليف والموظف المكلف، مرتبطة بالمهمة رقم ${task.id}. جميع الردود محفوظة في السجل نفسه.</p><div id="taskDiscussionHistory" class="messages task-discussion"><p class="hint">جارٍ تحميل سجل المناقشة...</p></div><form id="taskDiscussionForm" class="chat-compose"><input name="text" class="input" placeholder="اكتب ردك على المناقشة..." maxlength="4000" required><button class="btn" type="submit">إرسال الرد</button></form>`);
+ modal('مناقشة التكليف',`<p class="note">محادثة خاصة مستمرة بين مصدر التكليف والموظف المكلف، مرتبطة بالمهمة رقم ${task.id}. جميع الردود محفوظة في السجل نفسه.</p><div id="taskDiscussionHistory" class="messages task-discussion"><p class="hint">جارٍ تحميل سجل المناقشة...</p></div><form id="taskDiscussionForm" class="chat-compose shared-compose"><input name="text" class="input" placeholder="اكتب ردك أو أرفق مستندًا..." maxlength="4000">${sharedPicker()}<button class="btn" type="submit">إرسال الرد</button></form>`);
  const update=async()=>{
     const box=$('taskDiscussionHistory');if(!box)return;
     const rows=await api('/messages?channel='+encodeURIComponent(channel));if(!$('taskDiscussionHistory'))return;
     const near=box.scrollHeight-box.scrollTop-box.clientHeight<85;
-    box.innerHTML=rows.map(m=>`<div class="message ${m.sender_id===state.me.id?'own':''}"><strong>${safe(m.sender)}</strong>${safe(m.text)}<time>${fmt(m.created_at)}</time></div>`).join('')||'<p class="hint">لا توجد رسائل بعد. ابدأ المناقشة هنا.</p>';
+    box.innerHTML=rows.map(chatMessageHtml).join('')||'<p class="hint">لا توجد رسائل بعد. ابدأ المناقشة هنا.</p>';bindChatModeration(box,update);
     if(near)box.scrollTop=box.scrollHeight;
     if(rows.length)await api('/messages/read',{method:'POST',data:{channel,last_id:rows[rows.length-1].id}});
     await pollNotifications(true);
  };
- $('taskDiscussionForm').onsubmit=request(async e=>{e.preventDefault();const form=e.currentTarget;if(form.dataset.sending==='1')return;const text=form.elements.text.value.trim();if(!text)return;const btn=form.querySelector('button');form.dataset.sending='1';btn.disabled=true;try{await api('/messages',{method:'POST',data:{channel,text}});form.reset();await update()}finally{btn.disabled=false;form.dataset.sending='0'}});
+ $('taskDiscussionForm').onsubmit=request(async e=>{e.preventDefault();const form=e.currentTarget;if(form.dataset.sending==='1')return;const text=form.elements.text.value.trim();const files=validateSharedSelection(form);if(!text&&!files.length)return;const btn=form.querySelector('button[type="submit"]');form.dataset.sending='1';btn.disabled=true;try{if(files.length){const data=new FormData(form);data.set('channel',channel);await sendSharedForm('/messages/upload',data)}else{await api('/messages',{method:'POST',data:{channel,text}})}form.reset();await update()}finally{btn.disabled=false;form.dataset.sending='0'}});
  await update();if(state.discussionTimer)clearInterval(state.discussionTimer);
  state.discussionTimer=setInterval(()=>{if($('taskDiscussionHistory')&&!document.hidden)update().catch(()=>{})},8000);
 }
 
-function renderChat(){const available=channels();if(!available.some(c=>c.id===state.channel))state.channel='general';const body=`<div class="page-head"><div><h2>التواصل المباشر بين الإدارة والموظفين</h2><p>محادثات دائمة مع تحديث دوري كل 8 ثوانٍ.</p></div><button id="chatRefresh" class="btn secondary">تحديث الرسائل</button></div><div class="chat-grid"><div class="panel channels">${available.map(c=>`<button data-channel="${safe(c.id)}" class="${state.channel===c.id?'selected':''}">${safe(c.name)}</button>`).join('')}</div><div class="panel"><h3 id="channelName">${safe(available.find(c=>c.id===state.channel).name)}</h3><div id="messageList" class="messages"></div><form id="messageForm" class="chat-compose"><input class="input" name="text" autocomplete="off" maxlength="4000" placeholder="اكتب توجيهًا أو رسالة..." required><button class="btn">إرسال</button></form></div></div>`;renderShell('مركز المحادثات',body);document.querySelectorAll('[data-channel]').forEach(x=>x.onclick=()=>{state.channel=x.dataset.channel;renderChat()});$('chatRefresh').onclick=refreshMessages;
- $('messageForm').onsubmit=request(async e=>{e.preventDefault();const form=e.currentTarget;if(form.dataset.sending==='1')return;const text=form.elements.text.value.trim();if(!text)return;const b=form.querySelector('button');b.disabled=true;form.dataset.sending='1';try{await api('/messages',{method:'POST',data:{channel:state.channel,text}});form.reset();await refreshMessages()}finally{b.disabled=false;form.dataset.sending='0'}});refreshMessages();if(state.chatTimer)clearInterval(state.chatTimer);state.chatTimer=setInterval(()=>{if(state.page==='chat')refreshMessages()},8000);
+function renderChat(){const available=channels();if(!available.some(c=>c.id===state.channel))state.channel='general';const body=`<div class="page-head"><div><h2>التواصل المباشر بين الإدارة والموظفين</h2><p>محادثات دائمة مع تحديث دوري كل 8 ثوانٍ.</p></div><button id="chatRefresh" class="btn secondary">تحديث الرسائل</button></div><div class="chat-grid"><div class="panel channels">${available.map(c=>`<button data-channel="${safe(c.id)}" class="${state.channel===c.id?'selected':''}">${safe(c.name)}</button>`).join('')}</div><div class="panel"><h3 id="channelName">${safe(available.find(c=>c.id===state.channel).name)}</h3><div id="messageList" class="messages"></div><form id="messageForm" class="chat-compose shared-compose"><input class="input" name="text" autocomplete="off" maxlength="4000" placeholder="اكتب توجيهًا أو رسالة أو أرفق ملفًا...">${sharedPicker()}<button class="btn" type="submit">إرسال</button></form></div></div>`;renderShell('مركز المحادثات',body);document.querySelectorAll('[data-channel]').forEach(x=>x.onclick=()=>{state.channel=x.dataset.channel;renderChat()});$('chatRefresh').onclick=refreshMessages;
+ $('messageForm').onsubmit=request(async e=>{e.preventDefault();const form=e.currentTarget;if(form.dataset.sending==='1')return;const text=form.elements.text.value.trim();const files=validateSharedSelection(form);if(!text&&!files.length)return;const b=form.querySelector('button[type="submit"]');b.disabled=true;form.dataset.sending='1';try{if(files.length){const data=new FormData(form);data.set('channel',state.channel);await sendSharedForm('/messages/upload',data)}else{await api('/messages',{method:'POST',data:{channel:state.channel,text}})}form.reset();await refreshMessages()}finally{b.disabled=false;form.dataset.sending='0'}});refreshMessages();if(state.chatTimer)clearInterval(state.chatTimer);state.chatTimer=setInterval(()=>{if(state.page==='chat')refreshMessages()},8000);
 }
 function renderEmployees(){
   const all=state.users;
@@ -386,14 +418,14 @@ function drawInternalMail(){
  document.querySelectorAll('[data-internal-thread]').forEach(btn=>btn.onclick=request(async()=>openInternalMail(Number(btn.dataset.internalThread))));};
  $('mailSearch').oninput=redrawList;redrawList();bindMailReply();
 }
-function mailReaderHtml(data){const th=data.thread;return `<header class="mail-reader-head"><div><h3>${safe(th.subject)}</h3><p>مراسلة مع: <b>${safe(th.other?.name||'حساب غير متاح')}</b> · ${safe(th.other?.department||'')}</p></div><span class="pill done">مراسلة داخلية</span></header><div class="mail-letter-scroll">${data.messages.map(m=>`<div class="mail-letter ${m.sender_id===state.me.id?'mine':''}"><div class="mail-letter-head"><b>${safe(m.sender)}</b><time>${fmt(m.created_at)}</time></div><div class="mail-letter-body">${safe(m.body)}</div><small>${m.sender_id===state.me.id?m.read_at?'تمت القراءة':'تم الإرسال':'واردة'}</small></div>`).join('')}</div><form id="replyInternalMail" class="mail-reply"><label class="form-field">الرد على الرسالة<textarea name="body" class="input" rows="4" required maxlength="6000" placeholder="اكتب ردك هنا..."></textarea></label><button type="submit" class="btn">إرسال الرد</button></form>`}
-function bindMailReply(){const form=$('replyInternalMail');if(!form||!state.mailSelected)return;form.onsubmit=request(async e=>{e.preventDefault();const btn=e.currentTarget.querySelector('button');btn.disabled=true;try{const body=new FormData(e.currentTarget).get('body');await api(`/inbox/${state.mailSelected}/reply`,{method:'POST',data:{body}});await reloadInternalMail();await openInternalMail(state.mailSelected);toast('تم إرسال الرد داخل المنصة')}finally{btn.disabled=false}})}
+function mailReaderHtml(data){const th=data.thread;return `<header class="mail-reader-head"><div><h3>${safe(th.subject)}</h3><p>مراسلة مع: <b>${safe(th.other?.name||'حساب غير متاح')}</b> · ${safe(th.other?.department||'')}</p></div><span class="pill done">مراسلة داخلية</span></header><div class="mail-letter-scroll">${data.messages.map(m=>`<div class="mail-letter ${m.sender_id===state.me.id?'mine':''}"><div class="mail-letter-head"><b>${safe(m.sender)}</b><time>${fmt(m.created_at)}</time></div><div class="mail-letter-body">${safe(m.body)}</div>${sharedAttachmentHtml(m.attachments,'mail')}<small>${m.sender_id===state.me.id?m.read_at?'تمت القراءة':'تم الإرسال':'واردة'}</small></div>`).join('')}</div><form id="replyInternalMail" class="mail-reply"><label class="form-field">الرد على الرسالة<textarea name="body" class="input" rows="4" maxlength="6000" placeholder="اكتب ردك أو أرفق ملفًا هنا..."></textarea></label>${sharedPicker()}<button type="submit" class="btn">إرسال الرد</button></form>`}
+function bindMailReply(){const form=$('replyInternalMail');if(!form||!state.mailSelected)return;form.onsubmit=request(async e=>{e.preventDefault();const btn=e.currentTarget.querySelector('button');btn.disabled=true;try{const files=validateSharedSelection(e.currentTarget);const fd=new FormData(e.currentTarget);const body=String(fd.get('body')||'').trim();if(!body&&!files.length)throw Error('اكتب ردًا أو أرفق ملفًا');if(files.length){await sendSharedForm(`/inbox/${state.mailSelected}/reply/upload`,fd)}else{await api(`/inbox/${state.mailSelected}/reply`,{method:'POST',data:{body}})}await reloadInternalMail();await openInternalMail(state.mailSelected);toast('تم إرسال الرد داخل المنصة')}finally{btn.disabled=false}})}
 async function openInternalMail(id){state.mailSelected=id;const data=await api('/inbox/'+id);if(state.page!=='inbox'||state.mailSelected!==id)return;state.mailThread=data;await api(`/inbox/${id}/read`,{method:'POST'});const [newRows,unread]=await Promise.all([api('/inbox?folder='+state.mailFolder),api('/inbox/unread')]);if(state.page!=='inbox'||state.mailSelected!==id)return;state.mailThreads=newRows.threads;state.mailUnread=unread.unread_threads;updateMailBadge();await pollNotifications(true);drawInternalMail();}
 async function composeInternalMail(){
  const contacts=state.mailContacts.length?state.mailContacts:await api('/inbox/contacts');
  if(!contacts.length){toast('لا يوجد موظفون نشطون آخرون لإرسال المراسلة');return}
- modal('إنشاء رسالة داخلية',`<form id="composeMailForm" class="form-stack"><p class="note">هذه المراسلة تصل إلى صندوق وارد الموظف داخل تطبيق إنجاز فقط؛ لا يوجد إرسال بريد إلكتروني خارجي.</p><label class="form-field">إلى الموظف<select name="recipient_id" class="input" required>${contacts.map(u=>`<option value="${u.id}">${safe(u.name)} — ${safe(u.department)}</option>`).join('')}</select></label>${field('subject','موضوع الرسالة','text','','required maxlength="180"')}<label class="form-field">نص الرسالة<textarea name="body" class="input" rows="7" required maxlength="6000" placeholder="نص الرسالة..." ></textarea></label><button type="submit" class="btn">إرسال داخل المنصة</button></form>`);
- $('composeMailForm').onsubmit=request(async e=>{e.preventDefault();const btn=e.currentTarget.querySelector('button');btn.disabled=true;try{const f=new FormData(e.currentTarget);const r=await api('/inbox',{method:'POST',data:{recipient_id:Number(f.get('recipient_id')),subject:f.get('subject'),body:f.get('body')}});closeModal();state.mailFolder='sent';state.mailSelected=r.id;state.mailThread=null;await renderInbox();await openInternalMail(r.id);toast('تم إرسال الرسالة إلى البريد الداخلي')}finally{btn.disabled=false}});
+ modal('إنشاء رسالة داخلية',`<form id="composeMailForm" class="form-stack"><p class="note">هذه المراسلة تصل إلى صندوق وارد الموظف داخل تطبيق إنجاز فقط؛ لا يوجد إرسال بريد إلكتروني خارجي.</p><label class="form-field">إلى الموظف<select name="recipient_id" class="input" required>${contacts.map(u=>`<option value="${u.id}">${safe(u.name)} — ${safe(u.department)}</option>`).join('')}</select></label>${field('subject','موضوع الرسالة','text','','required maxlength="180"')}<label class="form-field">نص الرسالة<textarea name="body" class="input" rows="7" maxlength="6000" placeholder="نص الرسالة أو ارفق ملفًا..." ></textarea></label>${sharedPicker()}<button type="submit" class="btn">إرسال داخل المنصة</button></form>`);
+ $('composeMailForm').onsubmit=request(async e=>{e.preventDefault();const btn=e.currentTarget.querySelector('button');btn.disabled=true;try{const files=validateSharedSelection(e.currentTarget);const f=new FormData(e.currentTarget);if(!String(f.get('body')||'').trim()&&!files.length)throw Error('اكتب نص الرسالة أو أرفق ملفًا');const r=files.length?await sendSharedForm('/inbox/upload',f):await api('/inbox',{method:'POST',data:{recipient_id:Number(f.get('recipient_id')),subject:f.get('subject'),body:f.get('body')}});closeModal();state.mailFolder='sent';state.mailSelected=r.id;state.mailThread=null;await renderInbox();await openInternalMail(r.id);toast('تم إرسال الرسالة إلى البريد الداخلي')}finally{btn.disabled=false}});
 }
 
 function changePasswordModal(mandatory){modal('تغيير كلمة المرور',`<p class="note">${mandatory?'يجب تغيير كلمة المرور المؤقتة قبل تنفيذ أي تعديل في التطبيق.':'غيّر كلمة المرور الخاصة بحسابك.'}</p><form id="passwordForm" class="form-stack">${field('old_password','كلمة المرور الحالية','password','','required autocomplete="current-password"')}${field('new_password','كلمة المرور الجديدة (12 حرفًا على الأقل)','password','','required minlength="12" autocomplete="new-password"')}<button class="btn">تحديث كلمة المرور</button></form>`);if(mandatory){$('closeModal').onclick=()=>{closeModal();toast('يجب تغيير كلمة المرور المؤقتة')}}$('passwordForm').onsubmit=request(async e=>{e.preventDefault();const f=new FormData(e.currentTarget);await api('/auth/change-password',{method:'POST',data:{old_password:f.get('old_password'),new_password:f.get('new_password')}});state.me.must_change_password=false;closeModal();toast('تم تحديث كلمة المرور')});}

@@ -103,3 +103,22 @@
 
 /* The adviser creation form hides department selection entirely. */
 [hidden]{display:none!important}
+
+/* Chat moderation and private on-platform media/file attachments */
+.shared-compose{display:flex;flex-wrap:wrap;align-items:center}
+.shared-compose>.input{min-width:180px;flex:1 1 240px}
+.shared-compose>.shared-picker{flex:1 1 190px}
+.shared-picker{display:grid;gap:6px;background:#f5f9f6;border:1px dashed #b6d0c0;border-radius:10px;padding:9px 11px;color:#466c58;font-size:11px;font-weight:600;min-width:0}
+.shared-picker input[type=file]{font-size:11px;max-width:100%;width:100%}
+.shared-attachments{margin:7px 0;display:flex;flex-wrap:wrap;gap:8px}
+.shared-item{display:grid;gap:5px;max-width:240px;padding:7px;background:#fafcfb;border:1px solid #dce8e0;border-radius:9px;min-width:0}
+.shared-item img{max-width:100%;width:180px;height:110px;object-fit:contain;background:#eef4f0;border-radius:8px}
+.shared-file-link{font-size:11px;color:#17664e;overflow-wrap:anywhere;text-decoration:underline}
+.shared-file-link small{font-size:10px;color:#687b70}
+.message-bottom{display:flex;align-items:center;justify-content:space-between;gap:9px;margin-top:7px;flex-wrap:wrap}
+.message-bottom time{margin:0}
+.chat-remove{background:#fff4f2;color:#a13c30;border:1px solid #e6bdb6;border-radius:6px;padding:4px 7px;cursor:pointer;font-size:10px}
+.chat-remove:hover{background:#fce4df}
+.message.moderated{background:#eee;color:#67756b;font-style:italic}
+.mail-reply .shared-picker{max-width:480px}
+@media(max-width:540px){.shared-compose{align-items:stretch}.shared-compose>.input,.shared-compose>.shared-picker{flex-basis:100%}.shared-item{max-width:100%}}

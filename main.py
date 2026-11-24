@@ -144,6 +144,28 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
     sender: Mapped[User] = relationship()
 
+class ChatModeration(Base):
+    """Soft moderation with preserved audit evidence (no destruction of source messages)."""
+    __tablename__ = 'chat_moderations'
+    message_id: Mapped[int] = mapped_column(ForeignKey('messages.id'), primary_key=True)
+    removed_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    reason: Mapped[str] = mapped_column(String(500))
+    removed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+
+class SharedAttachment(Base):
+    """Private attachment of one chat message or one internal mail entry."""
+    __tablename__ = 'shared_attachments'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(8), index=True)   # chat | mail
+    owner_id: Mapped[int] = mapped_column(Integer, index=True)
+    uploaded_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    filename: Mapped[str] = mapped_column(String(240))
+    media_type: Mapped[str] = mapped_column(String(120))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+
 class InternalMailThread(Base):
     """Private two-person in-app mail thread. Director has no bypass to third-party mail."""
     __tablename__ = 'internal_mail_threads'
@@ -392,6 +414,9 @@ class AssignBody(BaseModel):
 class Decision(BaseModel):
     decision: str
     reason: str = Field(default='',max_length=1000)
+class ModerateChatBody(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
 class MessageCreate(BaseModel):
     channel: str
     text: str = Field(min_length=1,max_length=4000)
@@ -986,6 +1011,70 @@ def validate_attachment(name: str, data: bytes):
     return ATTACHMENT_MIME[ext]
 
 
+MAX_SHARED_FILE_BYTES = 5 * 1024 * 1024
+MAX_SHARED_FILES_PER_MESSAGE = 3
+MAX_SHARED_THREAD_BYTES = 50 * 1024 * 1024
+
+def shared_meta(a):
+    return {'id':a.id, 'filename':a.filename, 'media_type':a.media_type,
+            'size_bytes':a.size_bytes, 'uploaded_at':iso(a.uploaded_at),
+            'is_image':a.media_type.startswith('image/')}
+
+
+def shared_list(db, kind, owners):
+    ids=list(owners)
+    if not ids: return {}
+    rows=db.scalars(select(SharedAttachment).where(
+        SharedAttachment.kind==kind,SharedAttachment.owner_id.in_(ids))
+        .order_by(SharedAttachment.id)).all()
+    result={}
+    for row in rows:result.setdefault(row.owner_id,[]).append(shared_meta(row))
+    return result
+
+
+async def validate_shared_files(files, db):
+    if not files or len(files)>MAX_SHARED_FILES_PER_MESSAGE:
+        raise HTTPException(400, 'يمكن إرفاق ملف إلى ثلاثة ملفات في الرسالة الواحدة')
+    prepared=[]
+    try:
+        for file in files:
+            name=clean_filename(file.filename or '')
+            data=await file.read(MAX_SHARED_FILE_BYTES+1)
+            if not data or len(data)>MAX_SHARED_FILE_BYTES:
+                raise HTTPException(413,'الحد الأقصى لكل مرفق في المراسلات هو 5 ميجابايت')
+            mime=validate_attachment(name,data)
+            prepared.append((name,mime,data))
+    finally:
+        for file in files:await file.close()
+    used=db.scalar(select(func.coalesce(func.sum(TaskAttachment.size_bytes),0))) or 0
+    shared=db.scalar(select(func.coalesce(func.sum(SharedAttachment.size_bytes),0))) or 0
+    if used+shared+sum(len(data) for _,_,data in prepared)>MAX_ATTACHMENTS_GLOBAL:
+        raise HTTPException(507,'بلغ تخزين المرفقات التجريبي الحد المخصص له')
+    return prepared
+
+
+def save_shared_files(db,kind,owner_id,actor_id,prepared):
+    for name,mime,data in prepared:
+        db.add(SharedAttachment(kind=kind,owner_id=owner_id,uploaded_by=actor_id,
+            filename=name,media_type=mime,size_bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),content=data))
+
+
+def attachment_delivery(db,att,s,inline):
+    if not att:raise HTTPException(404,'المرفق غير موجود')
+    if inline and not att.media_type.startswith('image/'):
+        raise HTTPException(400,'عرض الصور فقط متاح داخل المنصة')
+    suffix=Path(att.filename).suffix.lower()
+    mode='inline' if inline else 'attachment'
+    header_name=quote(att.filename,safe='')
+    if not inline:
+        audit(db,s.user_id,'shared_attachment_download',f'kind={att.kind},attachment={att.id}')
+        db.commit()
+    return Response(content=att.content,
+        media_type=att.media_type if inline else 'application/octet-stream',
+        headers={'Content-Disposition':f"{mode}; filename=\"enjaz-{att.id}{suffix}\"; filename*=UTF-8''{header_name}",
+                 'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
+                 'Content-Security-Policy':"default-src 'none'; sandbox"})
+
 def attachment_meta(a):
     return {'id':a.id,'task_id':a.task_id,'filename':a.filename,'category':a.category,
             'size_bytes':a.size_bytes,'uploaded_by':a.uploaded_by,
@@ -1024,7 +1113,7 @@ async def upload_attachment(task_id:int, file: UploadFile=File(...), category:st
     mime=validate_attachment(name,data)
     task_bytes=db.scalar(select(func.coalesce(func.sum(TaskAttachment.size_bytes),0))
                          .where(TaskAttachment.task_id==task_id)) or 0
-    global_bytes=db.scalar(select(func.coalesce(func.sum(TaskAttachment.size_bytes),0))) or 0
+    global_bytes=(db.scalar(select(func.coalesce(func.sum(TaskAttachment.size_bytes),0))) or 0) + (db.scalar(select(func.coalesce(func.sum(SharedAttachment.size_bytes),0))) or 0)
     if task_bytes+len(data)>MAX_TASK_ATTACHMENT_TOTAL:
         raise HTTPException(413,'إجمالي مرفقات المهمة يجب ألا يتجاوز 40 ميجابايت')
     if global_bytes+len(data)>MAX_ATTACHMENTS_GLOBAL:
@@ -1115,6 +1204,19 @@ def allowed_channel(me,channel,db):
         return bool(task and not is_deleted(db,tid) and me.id in (task.created_by,task.assigned_to))
     return False
 
+def can_moderate_chat(me,channel,db):
+    # This is not permission to read a task discussion unrelated to oneself.
+    if me.role not in ('director','advisor','head'):return False
+    if not allowed_channel(me,channel,db):return False
+    if channel=='general':return True
+    if channel.startswith('dept:'):
+        dept_id=int(channel.split(':',1)[1])
+        return is_executive(me) or (me.role=='head' and me.department_id==dept_id)
+    if channel.startswith('task:'):
+        task=db.get(Task,int(channel.split(':',1)[1]))
+        return bool(task and me.id in (task.created_by,task.assigned_to))
+    return False
+
 def chat_channels_for(db:Session,me:User):
     result=['general']
     if is_executive(me):
@@ -1133,7 +1235,8 @@ def chat_unread_for(db:Session,me:User):
     q=(select(Message.channel,func.count(Message.id))
        .outerjoin(ChatRead,and_(ChatRead.user_id==me.id,ChatRead.channel==Message.channel))
        .where(Message.channel.in_(channels),Message.sender_id!=me.id,
-              Message.id>func.coalesce(ChatRead.last_message_id,0))
+              Message.id>func.coalesce(ChatRead.last_message_id,0),
+              ~Message.id.in_(select(ChatModeration.message_id)))
        .group_by(Message.channel))
     return {channel:int(n) for channel,n in db.execute(q).all() if n}
 
@@ -1190,14 +1293,59 @@ def notification_read_all(db:Session=Depends(get_db),s=Depends(require_login)):
 def get_messages(channel:str='general',after:int=0,db:Session=Depends(get_db),s=Depends(require_login)):
     if not allowed_channel(s.user,channel,db):raise HTTPException(403,'المحادثة غير متاحة')
     q=select(Message).where(Message.channel==channel,Message.id>max(after,0)).order_by(Message.id.desc()).limit(150)
-    ms=db.scalars(q).all()
-    return [{'id':m.id,'channel':m.channel,'sender':m.sender.full_name,'sender_id':m.sender_id,'text':m.text,'created_at':iso(m.created_at)} for m in reversed(ms)]
+    ms=list(reversed(db.scalars(q).all()))
+    removed={r.message_id:r for r in db.scalars(select(ChatModeration).where(
+        ChatModeration.message_id.in_([m.id for m in ms] or [-1])))}
+    attachments=shared_list(db,'chat',[m.id for m in ms if m.id not in removed])
+    moderator=can_moderate_chat(s.user,channel,db)
+    return [{'id':m.id,'channel':m.channel,'sender':m.sender.full_name,'sender_id':m.sender_id,
+             'text':'تم حذف هذه الرسالة بواسطة الإشراف' if m.id in removed else m.text,
+             'created_at':iso(m.created_at),'deleted':m.id in removed,
+             'deleted_at':iso(removed[m.id].removed_at) if m.id in removed else None,
+             'can_moderate':moderator and m.id not in removed,
+             'attachments':attachments.get(m.id,[])} for m in ms]
 
 @app.post('/api/messages',status_code=201)
 def post_message(data:MessageCreate,db:Session=Depends(get_db),s=Depends(require_login)):
     if not allowed_channel(s.user,data.channel,db):raise HTTPException(403,'المحادثة غير متاحة')
     m=Message(channel=data.channel,sender_id=s.user_id,text=data.text.strip());db.add(m);db.flush();audit(db,s.user_id,'message',data.channel);db.commit()
     return {'id':m.id,'ok':True}
+
+@app.post('/api/messages/upload',status_code=201)
+async def post_message_with_files(channel:str=Form(...),text:str=Form(''),files:list[UploadFile]=File(...),
+                                  db:Session=Depends(get_db),s=Depends(require_login)):
+    if not allowed_channel(s.user,channel,db):raise HTTPException(403,'المحادثة غير متاحة')
+    message=text.strip()
+    if len(message)>4000:raise HTTPException(400,'نص المحادثة طويل جدًا')
+    prepared=await validate_shared_files(files,db)
+    m=Message(channel=channel,sender_id=s.user_id,text=message)
+    db.add(m);db.flush()
+    save_shared_files(db,'chat',m.id,s.user_id,prepared)
+    audit(db,s.user_id,'message_files',f'channel={channel},message={m.id},files={len(prepared)}')
+    db.commit()
+    return {'ok':True,'id':m.id,'files':len(prepared)}
+
+@app.delete('/api/messages/{message_id}')
+def moderate_chat(message_id:int,data:ModerateChatBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    msg=db.get(Message,message_id)
+    if not msg:raise HTTPException(404,'الرسالة غير موجودة')
+    if not can_moderate_chat(s.user,msg.channel,db):raise HTTPException(403,'لا تملك صلاحية الإشراف على هذه المحادثة')
+    if db.get(ChatModeration,message_id):raise HTTPException(409,'تم حذف الرسالة مسبقًا')
+    reason=data.reason.strip()
+    if len(reason)<3:raise HTTPException(400,'اكتب سببًا واضحًا لحذف الرسالة')
+    db.add(ChatModeration(message_id=message_id,removed_by=s.user_id,reason=reason))
+    audit(db,s.user_id,'chat_moderated',f'message={message_id},channel={msg.channel},reason={reason}')
+    db.commit()
+    return {'ok':True,'message_id':message_id}
+
+@app.get('/api/messages/attachments/{attachment_id}')
+def get_chat_file(attachment_id:int,inline:bool=False,db:Session=Depends(get_db),s=Depends(require_login)):
+    att=db.get(SharedAttachment,attachment_id)
+    if not att or att.kind!='chat':raise HTTPException(404,'المرفق غير موجود')
+    msg=db.get(Message,att.owner_id)
+    if not msg or db.get(ChatModeration,msg.id) or not allowed_channel(s.user,msg.channel,db):
+        raise HTTPException(404,'المرفق غير متاح')
+    return attachment_delivery(db,att,s,inline)
 
 @app.post('/api/activity/pulse')
 def heartbeat(data:Pulse,db:Session=Depends(get_db),s=Depends(require_login)):
@@ -1365,9 +1513,13 @@ def internal_mail_thread_summary(db: Session,th: InternalMailThread,me:User):
     unread=db.scalar(select(func.count()).select_from(InternalMailEntry).where(
         InternalMailEntry.thread_id==th.id,InternalMailEntry.recipient_id==me.id,
         InternalMailEntry.read_at.is_(None))) or 0
+    last_body=latest.body[:180] if latest else ''
+    if latest and not last_body and db.scalar(select(SharedAttachment.id).where(
+        SharedAttachment.kind=='mail',SharedAttachment.owner_id==latest.id).limit(1)):
+        last_body='📎 مرفقات'
     return {'id':th.id,'subject':th.subject,'other':internal_mail_person(other) if other else None,
             'created_at':iso(th.created_at),'updated_at':iso(th.updated_at),
-            'last_body':latest.body[:180] if latest else '',
+            'last_body':last_body,
             'last_sender_id':latest.sender_id if latest else None,
             'unread_count':int(unread),'message_count':int(db.scalar(select(func.count()).select_from(InternalMailEntry).where(InternalMailEntry.thread_id==th.id)) or 0)}
 
@@ -1421,9 +1573,11 @@ def read_internal_mail(thread_id:int,db:Session=Depends(get_db),s=Depends(requir
     items=db.scalars(select(InternalMailEntry).where(InternalMailEntry.thread_id==thread.id)
                      .order_by(InternalMailEntry.id.asc()).limit(500)).all()
     userids=set([thread.initiator_id,thread.recipient_id]);people={uid:db.get(User,uid) for uid in userids}
+    attachments=shared_list(db,'mail',[item.id for item in items])
     return {'thread':internal_mail_thread_summary(db,thread,s.user),'messages':[
         {'id':x.id,'sender_id':x.sender_id,'sender':people[x.sender_id].full_name if people.get(x.sender_id) else '',
-         'recipient_id':x.recipient_id,'body':x.body,'created_at':iso(x.created_at),'read_at':iso(x.read_at)}
+         'recipient_id':x.recipient_id,'body':x.body,'created_at':iso(x.created_at),'read_at':iso(x.read_at),
+         'attachments':attachments.get(x.id,[])}
         for x in items]}
 
 
@@ -1453,3 +1607,53 @@ def reply_internal_mail(thread_id:int,data:InternalMailReply,db:Session=Depends(
     audit(db,s.user_id,'internal_mail_reply',f'thread={th.id},recipient={other_id}')
     db.commit()
     return {'ok':True,'thread_id':th.id}
+
+
+@app.post('/api/inbox/upload',status_code=201)
+async def compose_internal_mail_files(recipient_id:int=Form(...),subject:str=Form(...),body:str=Form(''),
+                                      files:list[UploadFile]=File(...),db:Session=Depends(get_db),s=Depends(require_login)):
+    receiver=db.get(User,recipient_id)
+    if not receiver or not receiver.active or receiver.id==s.user_id:
+        raise HTTPException(400,'اختر موظفًا نشطًا غير حسابك')
+    subject=subject.strip();body=body.strip()
+    if len(subject)<2 or len(subject)>180 or len(body)>6000:
+        raise HTTPException(400,'تحقق من الموضوع ونص الرسالة')
+    prepared=await validate_shared_files(files,db)
+    now=NOW();th=InternalMailThread(subject=subject,initiator_id=s.user_id,recipient_id=recipient_id,created_at=now,updated_at=now)
+    db.add(th);db.flush()
+    entry=InternalMailEntry(thread_id=th.id,sender_id=s.user_id,recipient_id=recipient_id,body=body,created_at=now)
+    db.add(entry);db.flush()
+    save_shared_files(db,'mail',entry.id,s.user_id,prepared)
+    audit(db,s.user_id,'internal_mail_send_files',f'thread={th.id},recipient={recipient_id},files={len(prepared)}')
+    db.commit();return {'ok':True,'id':th.id}
+
+@app.post('/api/inbox/{thread_id}/reply/upload',status_code=201)
+async def reply_internal_mail_files(thread_id:int,body:str=Form(''),files:list[UploadFile]=File(...),
+                                    db:Session=Depends(get_db),s=Depends(require_login)):
+    th=internal_mail_thread(db,thread_id,s.user)
+    other_id=th.recipient_id if s.user_id==th.initiator_id else th.initiator_id
+    other=db.get(User,other_id)
+    if not other or not other.active:raise HTTPException(409,'لا يمكن الرد على حساب غير نشط')
+    body=body.strip()
+    if len(body)>6000:raise HTTPException(400,'نص الرد طويل جدًا')
+    prepared=await validate_shared_files(files,db)
+    thread_total=db.scalar(select(func.coalesce(func.sum(SharedAttachment.size_bytes),0)).where(
+        SharedAttachment.kind=='mail',SharedAttachment.owner_id.in_(select(InternalMailEntry.id).where(
+        InternalMailEntry.thread_id==thread_id)))) or 0
+    if thread_total+sum(len(data) for _,_,data in prepared)>MAX_SHARED_THREAD_BYTES:
+        raise HTTPException(413,'تجاوزت مرفقات المراسلة الحد المسموح به (50 ميجابايت)')
+    now=NOW();entry=InternalMailEntry(thread_id=thread_id,sender_id=s.user_id,
+                                    recipient_id=other_id,body=body,created_at=now)
+    db.add(entry);db.flush();save_shared_files(db,'mail',entry.id,s.user_id,prepared)
+    th.updated_at=now
+    audit(db,s.user_id,'internal_mail_reply_files',f'thread={th.id},files={len(prepared)}')
+    db.commit();return {'ok':True,'thread_id':th.id}
+
+@app.get('/api/inbox/attachments/{attachment_id}')
+def get_mail_file(attachment_id:int,inline:bool=False,db:Session=Depends(get_db),s=Depends(require_login)):
+    att=db.get(SharedAttachment,attachment_id)
+    if not att or att.kind!='mail':raise HTTPException(404,'المرفق غير موجود')
+    entry=db.get(InternalMailEntry,att.owner_id)
+    if not entry:raise HTTPException(404,'المرفق غير موجود')
+    internal_mail_thread(db,entry.thread_id,s.user)
+    return attachment_delivery(db,att,s,inline)
