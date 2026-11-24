@@ -3,10 +3,12 @@ import csv
 import hashlib
 import hmac
 import io
+import mimetypes
 import os
 import re
 import secrets
 import time
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -18,7 +20,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Response, File, Fo
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, String, Text,
+from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, String, Text, LargeBinary,
                         create_engine, func, select, and_, or_)
 from sqlalchemy.orm import (DeclarativeBase, Mapped, mapped_column, relationship,
                             sessionmaker, Session)
@@ -99,6 +101,7 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
     steps: Mapped[list['TaskStep']] = relationship(back_populates='task', cascade='all, delete-orphan', order_by='TaskStep.id')
+    attachments: Mapped[list['TaskAttachment']] = relationship(back_populates='task', cascade='all, delete-orphan')
 
 class TaskStep(Base):
     __tablename__ = 'task_steps'
@@ -109,6 +112,22 @@ class TaskStep(Base):
     done: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     task: Mapped[Task] = relationship(back_populates='steps')
+
+class TaskAttachment(Base):
+    """Durable pilot storage in PostgreSQL, never Railway's ephemeral container filesystem."""
+    __tablename__ = 'task_attachments'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey('tasks.id', ondelete='CASCADE'), index=True)
+    uploaded_by: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    filename: Mapped[str] = mapped_column(String(240))
+    media_type: Mapped[str] = mapped_column(String(120))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    category: Mapped[str] = mapped_column(String(20))  # instruction or result
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+    task: Mapped[Task] = relationship(back_populates='attachments')
+    uploader: Mapped[User] = relationship()
 
 class Message(Base):
     __tablename__ = 'messages'
@@ -603,6 +622,128 @@ def create_task(data:TaskCreate,db:Session=Depends(get_db),s=Depends(require_log
     task.steps=[TaskStep(title=step.title.strip(),weight=step.weight) for step in data.steps]
     db.add(task);db.flush();audit(db,me.id,'create_task',str(task.id));db.commit()
     return task_data(task,db)
+
+# Attachment policy: small documents only, stored in DB for durability across Railway redeploys.
+# For large/long-term workloads use approved private object storage + malware scanning.
+MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+MAX_TASK_ATTACHMENTS = 20
+MAX_TASK_ATTACHMENT_TOTAL = 40 * 1024 * 1024
+MAX_ATTACHMENTS_GLOBAL = 250 * 1024 * 1024  # pilot safety cap for 500 MB Postgres volume
+ATTACHMENT_MIME = {
+    '.pdf': 'application/pdf',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.txt': 'text/plain', '.csv': 'text/csv',
+}
+OOXML_ENTRY = {'.docx': 'word/document.xml', '.xlsx': 'xl/workbook.xml', '.pptx': 'ppt/presentation.xml'}
+
+
+def clean_filename(value: str) -> str:
+    # Reject path-separators and controls, rather than trusting client-supplied names.
+    name = (value or '').strip()
+    if (not name or len(name)>240 or name in ('.', '..') or '/' in name or '\\' in name
+            or any(ord(ch)<32 or ord(ch)==127 for ch in name)):
+        raise HTTPException(400, 'اسم الملف غير صالح')
+    return name
+
+
+def validate_attachment(name: str, data: bytes):
+    ext = Path(name).suffix.lower()
+    if ext not in ATTACHMENT_MIME:
+        raise HTTPException(400, 'نوع الملف غير مسموح. الصيغ المقبولة: PDF وWord وExcel وPowerPoint والصور وTXT وCSV')
+    if not data or len(data) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(413, 'يجب أن يكون الملف غير فارغ وألا يتجاوز 8 ميجابايت')
+    if ext=='.pdf' and not data.startswith(b'%PDF-'):
+        raise HTTPException(400, 'ملف PDF غير صالح')
+    if ext=='.png' and not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise HTTPException(400, 'ملف PNG غير صالح')
+    if ext in ('.jpg', '.jpeg') and not data.startswith(b'\xff\xd8\xff'):
+        raise HTTPException(400, 'ملف JPEG غير صالح')
+    if ext in OOXML_ENTRY:
+        if not zipfile.is_zipfile(io.BytesIO(data)):
+            raise HTTPException(400, 'ملف Office غير صالح')
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                names = set(z.namelist())
+                # Inspection without decompressing document contents.
+                if (len(names)>2500 or '[Content_Types].xml' not in names
+                    or OOXML_ENTRY[ext] not in names or any('vbaproject.bin' in n.lower() for n in names)):
+                    raise HTTPException(400, 'الملف ليس مستند Office صالحًا أو يحتوي على ماكرو')
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as err:
+            raise HTTPException(400, 'ملف Office غير صالح') from err
+    return ATTACHMENT_MIME[ext]
+
+
+def attachment_meta(a):
+    return {'id':a.id,'task_id':a.task_id,'filename':a.filename,'category':a.category,
+            'size_bytes':a.size_bytes,'uploaded_by':a.uploaded_by,
+            'uploader':a.uploader.full_name if a.uploader else '',
+            'uploaded_at':iso(a.uploaded_at)}
+
+
+@app.get('/api/tasks/{task_id}/attachments')
+def list_attachments(task_id:int, db:Session=Depends(get_db), s=Depends(require_login)):
+    get_task(db,task_id,s.user)
+    rows=db.scalars(select(TaskAttachment).where(TaskAttachment.task_id==task_id)
+                    .order_by(TaskAttachment.uploaded_at.desc(),TaskAttachment.id.desc())).all()
+    return [attachment_meta(a) for a in rows]
+
+
+@app.post('/api/tasks/{task_id}/attachments', status_code=201)
+async def upload_attachment(task_id:int, file: UploadFile=File(...), category:str=Form('result'),
+                            db:Session=Depends(get_db),s=Depends(require_login)):
+    task=get_task(db,task_id,s.user)
+    if s.user.id not in (task.assigned_to, task.created_by) and not can_approve(s.user,task):
+        raise HTTPException(403, 'لا تملك صلاحية الإرفاق لهذه المهمة')
+    if task.status=='done':
+        raise HTTPException(409, 'المهمة معتمدة ومغلقة ولا تقبل مرفقات إضافية')
+    if category not in ('instruction','result'):
+        raise HTTPException(400, 'تصنيف المرفق غير صحيح')
+    if category=='instruction' and not (task.created_by==s.user.id or can_approve(s.user,task)):
+        raise HTTPException(403, 'إرفاق تعليمات التكليف متاح لمصدر المهمة أو صاحب صلاحية الاعتماد')
+    existing=db.scalar(select(func.count(TaskAttachment.id)).where(TaskAttachment.task_id==task_id)) or 0
+    if existing>=MAX_TASK_ATTACHMENTS:
+        raise HTTPException(409, 'بلغت المهمة الحد الأقصى 20 مرفقًا')
+    name=clean_filename(file.filename or '')
+    try:
+        data=await file.read(MAX_ATTACHMENT_BYTES+1)
+    finally:
+        await file.close()
+    mime=validate_attachment(name,data)
+    task_bytes=db.scalar(select(func.coalesce(func.sum(TaskAttachment.size_bytes),0))
+                         .where(TaskAttachment.task_id==task_id)) or 0
+    global_bytes=db.scalar(select(func.coalesce(func.sum(TaskAttachment.size_bytes),0))) or 0
+    if task_bytes+len(data)>MAX_TASK_ATTACHMENT_TOTAL:
+        raise HTTPException(413,'إجمالي مرفقات المهمة يجب ألا يتجاوز 40 ميجابايت')
+    if global_bytes+len(data)>MAX_ATTACHMENTS_GLOBAL:
+        raise HTTPException(507,'بلغ تخزين المرفقات التجريبي الحد المخصص له. يرجى التواصل مع مدير النظام')
+    att=TaskAttachment(task_id=task_id,uploaded_by=s.user.id,filename=name,media_type=mime,
+                       size_bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),
+                       content=data,category=category)
+    db.add(att);db.flush()
+    audit(db,s.user.id,'upload_attachment',f'task={task_id},attachment={att.id},category={category},bytes={len(data)}')
+    db.commit()
+    return attachment_meta(att)
+
+
+@app.get('/api/tasks/{task_id}/attachments/{attachment_id}/download')
+def download_attachment(task_id:int, attachment_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    get_task(db,task_id,s.user)
+    attachment=db.get(TaskAttachment,attachment_id)
+    if not attachment or attachment.task_id!=task_id:
+        raise HTTPException(404, 'المرفق غير موجود')
+    audit(db,s.user.id,'download_attachment',f'task={task_id},attachment={attachment_id}')
+    db.commit()
+    header_name=quote(attachment.filename, safe='')
+    ascii_suffix=Path(attachment.filename).suffix.lower()
+    return Response(content=attachment.content,media_type='application/octet-stream',headers={
+        'Content-Disposition':f"attachment; filename=\"enjaz-file-{attachment.id}{ascii_suffix}\"; filename*=UTF-8''{header_name}",
+        'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
+        'Content-Security-Policy':"default-src 'none'; sandbox",
+    })
+
 
 @app.post('/api/tasks/{task_id}/assign')
 def assign_task(task_id:int,data:AssignBody,db:Session=Depends(get_db),s=Depends(require_login)):
