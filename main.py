@@ -1873,6 +1873,31 @@ def meeting_jwt(room:str,person:User):
 def meetings_config(s=Depends(require_login)):
     return {'video_enabled':video_available(),'max_participants':MEETING_MAX_ATTENDEES}
 
+@app.get('/api/meetings/diagnostics')
+def meetings_diagnostics(s=Depends(require_login)):
+    """Admin-only, read-only configuration diagnostics. Never returns URLs, secrets, or tokens."""
+    if s.user.role != 'director':
+        raise HTTPException(403, 'هذه الصفحة مخصصة لمدير عام الإدارة')
+    parsed = urlsplit(LIVEKIT_URL)
+    url_is_valid = (parsed.scheme == 'wss' and bool(parsed.hostname)
+                    and not parsed.username and not parsed.password
+                    and parsed.path in ('', '/') and not parsed.query and not parsed.fragment)
+    sdk_is_available = (MEETINGS_ALLOW_CDN_SDK or
+                        (Path(__file__).parent/'static'/'livekit-client.umd.min.js').is_file())
+    checks = [
+        ('video_approved', 'تفعيل الفيديو MEETINGS_VIDEO_APPROVED', MEETINGS_VIDEO_APPROVED),
+        ('livekit_url_valid', 'عنوان LIVEKIT_URL بصيغة wss:// صحيحة', url_is_valid),
+        ('api_key_present', 'وجود LIVEKIT_API_KEY', bool(LIVEKIT_API_KEY)),
+        ('api_secret_valid', 'وجود LIVEKIT_API_SECRET بطول مقبول', len(LIVEKIT_API_SECRET) >= 24),
+        ('sdk_available', 'إتاحة مكتبة LiveKit المعتمدة أو خيار CDN التجريبي', sdk_is_available),
+    ]
+    return {
+        'video_enabled': video_available(),
+        'checks': [{'code': code, 'label': label, 'passed': bool(passed)}
+                   for code, label, passed in checks],
+        'note': 'هذه النتائج لا تعرض قيم المتغيرات أو مفاتيح الاتصال. الفحص لا يثبت نجاح اتصال WebRTC.',
+    }
+
 @app.get('/api/meetings/contacts')
 def meeting_contacts(db:Session=Depends(get_db),s=Depends(require_login)):
     me=s.user
