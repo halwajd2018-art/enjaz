@@ -11,6 +11,8 @@ import secrets
 import time
 import zipfile
 from datetime import date, datetime, timedelta, timezone
+import base64
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -51,6 +53,25 @@ SESSION_SECONDS = 12 * 60 * 60
 ONLINE_WINDOW_SECONDS = 75
 EXECUTIVE_ROLES = ('director', 'advisor')
 GENERAL_MANAGEMENT_NAME = 'الإدارة العامة'
+# Meeting video is disabled until approved LiveKit credentials are explicitly configured.
+LIVEKIT_URL = os.getenv('LIVEKIT_URL', '').strip().rstrip('/')
+LIVEKIT_API_KEY = os.getenv('LIVEKIT_API_KEY', '').strip()
+LIVEKIT_API_SECRET = os.getenv('LIVEKIT_API_SECRET', '').strip()
+MEETINGS_VIDEO_APPROVED = os.getenv('MEETINGS_VIDEO_APPROVED', '').lower() == 'true'
+MEETINGS_ALLOW_CDN_SDK = os.getenv('MEETINGS_ALLOW_CDN_SDK','').lower() == 'true'
+MEETING_MAX_ATTENDEES = 16
+VIDEO_SDK_CDN = 'https://cdn.jsdelivr.net/npm/livekit-client@2.25.0/dist/livekit-client.umd.min.js'
+
+def video_available():
+    """Don't enable video with missing or malformed configuration."""
+    if not (MEETINGS_VIDEO_APPROVED and LIVEKIT_API_KEY and len(LIVEKIT_API_SECRET)>=24):
+        return False
+    # For production, vendor the reviewed SDK under /assets. Public CDN needs explicit opt-in.
+    if not MEETINGS_ALLOW_CDN_SDK and not (Path(__file__).parent/'static'/'livekit-client.umd.min.js').is_file():
+        return False
+    parsed = urlsplit(LIVEKIT_URL)
+    return parsed.scheme == 'wss' and bool(parsed.hostname) and not parsed.username and not parsed.password and parsed.path in ('','/') and not parsed.query and not parsed.fragment
+
 
 def is_executive(user):
     return user.role in EXECUTIVE_ROLES
@@ -243,6 +264,28 @@ class Audit(Base):
     details: Mapped[str] = mapped_column(String(1000), default='')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
 
+class VideoMeeting(Base):
+    __tablename__ = 'video_meetings'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(180))
+    description: Mapped[str] = mapped_column(String(2000), default='')
+    minutes_text: Mapped[str] = mapped_column(Text, default='')
+    organizer_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    room_name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    task_id: Mapped[Optional[int]] = mapped_column(ForeignKey('tasks.id'), nullable=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    duration_minutes: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default='scheduled')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+
+class VideoMeetingInvitation(Base):
+    __tablename__ = 'video_meeting_invitations'
+    __table_args__ = (UniqueConstraint('meeting_id','user_id',name='uq_video_meeting_invite'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    meeting_id: Mapped[int] = mapped_column(ForeignKey('video_meetings.id'), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
 class LoginAttempt(Base):
     __tablename__ = 'login_attempts'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -299,8 +342,17 @@ async def security_headers(request: Request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
     response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    response.headers['Permissions-Policy'] = 'camera=(self), microphone=(self), display-capture=(self), geolocation=()'
+    video_csp = ''
+    script_csp = ''
+    if video_available():
+        parsed = urlsplit(LIVEKIT_URL)
+        video_csp = f" {parsed.scheme}://{parsed.netloc} https://{parsed.netloc}"
+        # CDN use is for a controlled pilot only. Vendor SDK locally before production rollout.
+        script_csp = ' https://cdn.jsdelivr.net' if MEETINGS_ALLOW_CDN_SDK else ''
+    response.headers['Content-Security-Policy'] = ("default-src 'self'; script-src 'self'"+script_csp+
+        "; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'"+video_csp+
+        "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
     if IS_PROD:
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     response.headers['Cache-Control'] = 'no-store' if request.url.path.startswith('/api/') else 'private, max-age=0'
@@ -1753,3 +1805,174 @@ def get_mail_file(attachment_id:int,inline:bool=False,db:Session=Depends(get_db)
     if not entry:raise HTTPException(404,'المرفق غير موجود')
     internal_mail_thread(db,entry.thread_id,s.user)
     return attachment_delivery(db,att,s,inline)
+
+
+# ----------------------------------------------------------------------
+# Private video meetings: explicit invitations, never public meeting URLs.
+# ----------------------------------------------------------------------
+class MeetingCreateBody(BaseModel):
+    title: str = Field(min_length=3,max_length=180)
+    description: str = Field(default='',max_length=2000)
+    start_at: datetime
+    duration_minutes: int = Field(ge=15,le=180)
+    invitee_ids: list[int] = Field(min_length=1,max_length=MEETING_MAX_ATTENDEES-1)
+    task_id: Optional[int] = None
+
+
+def meeting_scope_permission(creator: User, other: User) -> bool:
+    if is_executive(creator):return True
+    if creator.department_id and creator.department_id==other.department_id:return True
+    return other.role in EXECUTIVE_ROLES
+
+
+def meeting_access(db:Session,meeting_id:int,me:User):
+    meeting=db.get(VideoMeeting,meeting_id)
+    if not meeting:raise HTTPException(404,'الاجتماع غير موجود')
+    if not db.scalar(select(VideoMeetingInvitation.id).where(
+        VideoMeetingInvitation.meeting_id==meeting_id,VideoMeetingInvitation.user_id==me.id)):
+        raise HTTPException(404,'الاجتماع غير موجود')
+    return meeting
+
+
+def meeting_json(db:Session,m:VideoMeeting,viewer:User):
+    invites=db.scalars(select(VideoMeetingInvitation).where(
+        VideoMeetingInvitation.meeting_id==m.id).order_by(VideoMeetingInvitation.id)).all()
+    people=[]
+    for inv in invites:
+        u=db.get(User,inv.user_id)
+        people.append({'id':inv.user_id,'name':u.full_name if u else 'حساب غير متاح',
+                       'role':u.role if u else '', 'active':bool(u and u.active),
+                       'seen':bool(inv.seen_at)})
+    return {'id':m.id,'title':m.title,'description':m.description,'minutes_text':m.minutes_text or '',
+            'start_at':iso(m.start_at),'duration_minutes':m.duration_minutes,
+            'task_id':m.task_id,'status':m.status,'organizer_id':m.organizer_id,
+            'is_organizer':viewer.id==m.organizer_id,'participants':people}
+
+
+def meeting_datetime(value:datetime):
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise HTTPException(422,'يجب إرسال تاريخ الاجتماع بتوقيت محدد')
+    return value.astimezone(UTC)
+
+
+def meeting_jwt(room:str,person:User):
+    """LiveKit compatible short-lived HS256 JWT; key and secret never reach browser."""
+    now=int(time.time())
+    payload={'iss':LIVEKIT_API_KEY,'sub':f'enjaz-{person.id}','name':person.full_name,
+             'iat':now,'nbf':now-5,'exp':now+300,'jti':secrets.token_urlsafe(16),
+             'video':{'roomJoin':True,'room':room,'canPublish':True,
+                      'canSubscribe':True,'canPublishData':True}}
+    header={'alg':'HS256','typ':'JWT'}
+    encoded=lambda x:base64.urlsafe_b64encode(json.dumps(x,ensure_ascii=False,
+                                       separators=(',',':')).encode()).rstrip(b'=').decode()
+    signing=f'{encoded(header)}.{encoded(payload)}'
+    signature=base64.urlsafe_b64encode(hmac.new(LIVEKIT_API_SECRET.encode(),signing.encode(),hashlib.sha256).digest()).rstrip(b'=').decode()
+    return f'{signing}.{signature}'
+
+@app.get('/api/meetings/config')
+def meetings_config(s=Depends(require_login)):
+    return {'video_enabled':video_available(),'max_participants':MEETING_MAX_ATTENDEES}
+
+@app.get('/api/meetings/contacts')
+def meeting_contacts(db:Session=Depends(get_db),s=Depends(require_login)):
+    me=s.user
+    people=db.scalars(select(User).where(User.active.is_(True),User.id!=me.id).order_by(User.full_name)).all()
+    return [user_data(u) for u in people if not db.get(UserRemoval,u.id) and meeting_scope_permission(me,u)]
+
+@app.get('/api/meetings')
+def list_meetings(db:Session=Depends(get_db),s=Depends(require_login)):
+    mine=select(VideoMeetingInvitation.meeting_id).where(VideoMeetingInvitation.user_id==s.user_id)
+    meetings=db.scalars(select(VideoMeeting).where(VideoMeeting.id.in_(mine))
+        .order_by(VideoMeeting.start_at.desc(),VideoMeeting.id.desc()).limit(100)).all()
+    return {'meetings':[meeting_json(db,m,s.user) for m in meetings]}
+
+@app.get('/api/meetings/unread')
+def meetings_unread(db:Session=Depends(get_db),s=Depends(require_login)):
+    count=db.scalar(select(func.count()).select_from(VideoMeetingInvitation)
+        .join(VideoMeeting,VideoMeeting.id==VideoMeetingInvitation.meeting_id)
+        .where(VideoMeetingInvitation.user_id==s.user_id,VideoMeetingInvitation.seen_at.is_(None),
+               VideoMeeting.organizer_id!=s.user_id,VideoMeeting.status=='scheduled')) or 0
+    return {'unread':count}
+
+@app.post('/api/meetings/seen')
+def meetings_seen(db:Session=Depends(get_db),s=Depends(require_login)):
+    for inv in db.scalars(select(VideoMeetingInvitation).where(
+        VideoMeetingInvitation.user_id==s.user_id,VideoMeetingInvitation.seen_at.is_(None))):
+        inv.seen_at=NOW()
+    db.commit()
+    return {'ok':True}
+
+@app.post('/api/meetings',status_code=201)
+def create_meeting(data:MeetingCreateBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    me=s.user
+    title=data.title.strip()
+    if len(title)<3:raise HTTPException(422,'عنوان الاجتماع قصير')
+    starts=meeting_datetime(data.start_at)
+    if starts<NOW()-timedelta(minutes=5) or starts>NOW()+timedelta(days=90):
+        raise HTTPException(422,'تاريخ الاجتماع خارج النطاق المسموح (90 يومًا)')
+    ids=set(data.invitee_ids)
+    if len(ids)!=len(data.invitee_ids) or me.id in ids or len(ids)>MEETING_MAX_ATTENDEES-1:
+        raise HTTPException(422,'قائمة المشاركين غير صالحة أو مكررة')
+    people=[db.get(User,n) for n in sorted(ids)]
+    if any(u is None or not u.active or db.get(UserRemoval,u.id) or
+           not meeting_scope_permission(me,u) for u in people):
+        raise HTTPException(403,'لا تملك صلاحية دعوة أحد المشاركين')
+    if data.task_id is not None:
+        task=db.get(Task,data.task_id)
+        if not task or is_deleted(db,data.task_id) or me.id not in (task.created_by,task.assigned_to):
+            raise HTTPException(403,'لا يمكن ربط الاجتماع بهذه المهمة')
+        permitted={task.created_by,task.assigned_to}
+        if not ids.issubset(permitted):
+            raise HTTPException(403,'اجتماع المهمة يقتصر على منشئ المهمة والمكلّف بها')
+    m=VideoMeeting(title=title,description=data.description.strip(),organizer_id=me.id,
+                   room_name='enjaz-'+secrets.token_urlsafe(24),task_id=data.task_id,
+                   start_at=starts,duration_minutes=data.duration_minutes)
+    db.add(m);db.flush()
+    db.add(VideoMeetingInvitation(meeting_id=m.id,user_id=me.id,seen_at=NOW()))
+    for user_id in ids:db.add(VideoMeetingInvitation(meeting_id=m.id,user_id=user_id))
+    audit(db,me.id,'meeting_created',f'meeting={m.id};invitees={len(ids)};task={data.task_id}')
+    db.commit()
+    return meeting_json(db,m,me)
+
+@app.get('/api/meetings/{meeting_id}')
+def read_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    m=meeting_access(db,meeting_id,s.user)
+    return meeting_json(db,m,s.user)
+
+@app.post('/api/meetings/{meeting_id}/join')
+def join_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    m=meeting_access(db,meeting_id,s.user)
+    if m.status!='scheduled':raise HTTPException(409,'تم إلغاء أو إنهاء الاجتماع')
+    if not video_available():raise HTTPException(503,'الاجتماعات المرئية غير مفعّلة حتى اعتماد إعداداتها الأمنية')
+    starts=m.start_at.replace(tzinfo=m.start_at.tzinfo or UTC).astimezone(UTC)
+    now=NOW()
+    if now<starts-timedelta(minutes=15) or now>starts+timedelta(minutes=m.duration_minutes+15):
+        raise HTTPException(409,'الدخول متاح قبل الاجتماع بـ15 دقيقة وحتى انتهاء الوقت المحدد')
+    # Do not audit or log bearer tokens; generated anew for every authorized join.
+    audit(db,s.user_id,'meeting_join_authorized',f'meeting={m.id}')
+    db.commit()
+    return {'server_url':LIVEKIT_URL,'token':meeting_jwt(m.room_name,s.user),
+            'meeting_id':m.id,'sdk_url':(VIDEO_SDK_CDN if MEETINGS_ALLOW_CDN_SDK else '/assets/livekit-client.umd.min.js')}
+
+@app.post('/api/meetings/{meeting_id}/end')
+def end_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    m=meeting_access(db,meeting_id,s.user)
+    if m.organizer_id!=s.user_id:raise HTTPException(403,'يمكن لمنظّم الاجتماع فقط إنهاؤه')
+    if m.status!='scheduled':raise HTTPException(409,'هذا الاجتماع منتهٍ بالفعل')
+    m.status='ended'
+    audit(db,s.user_id,'meeting_ended',f'meeting={m.id}')
+    db.commit()
+    return {'ok':True}
+
+class MeetingMinutesBody(BaseModel):
+    text: str = Field(default='',max_length=8000)
+
+@app.patch('/api/meetings/{meeting_id}/minutes')
+def update_meeting_minutes(meeting_id:int,data:MeetingMinutesBody,
+                           db:Session=Depends(get_db),s=Depends(require_login)):
+    meeting=meeting_access(db,meeting_id,s.user)
+    if meeting.organizer_id!=s.user_id:raise HTTPException(403,'محضر الاجتماع متاح للتعديل من المنظم فقط')
+    meeting.minutes_text=data.text.strip()
+    audit(db,s.user_id,'meeting_minutes_updated',f'meeting={meeting.id};length={len(meeting.minutes_text)}')
+    db.commit()
+    return meeting_json(db,meeting,s.user)

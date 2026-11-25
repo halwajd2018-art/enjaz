@@ -104,21 +104,28 @@
 /* The adviser creation form hides department selection entirely. */
 [hidden]{display:none!important}
 
-/* Chat moderation and private on-platform media/file attachments */
-.shared-compose{display:flex;flex-wrap:wrap;align-items:center}
-.shared-compose>.input{min-width:180px;flex:1 1 240px}
-.shared-compose>.shared-picker{flex:1 1 190px}
-.shared-picker{display:grid;gap:6px;background:#f5f9f6;border:1px dashed #b6d0c0;border-radius:10px;padding:9px 11px;color:#466c58;font-size:11px;font-weight:600;min-width:0}
-.shared-picker input[type=file]{font-size:11px;max-width:100%;width:100%}
-.shared-attachments{margin:7px 0;display:flex;flex-wrap:wrap;gap:8px}
-.shared-item{display:grid;gap:5px;max-width:240px;padding:7px;background:#fafcfb;border:1px solid #dce8e0;border-radius:9px;min-width:0}
-.shared-item img{max-width:100%;width:180px;height:110px;object-fit:contain;background:#eef4f0;border-radius:8px}
-.shared-file-link{font-size:11px;color:#17664e;overflow-wrap:anywhere;text-decoration:underline}
-.shared-file-link small{font-size:10px;color:#687b70}
-.message-bottom{display:flex;align-items:center;justify-content:space-between;gap:9px;margin-top:7px;flex-wrap:wrap}
-.message-bottom time{margin:0}
-.chat-remove{background:#fff4f2;color:#a13c30;border:1px solid #e6bdb6;border-radius:6px;padding:4px 7px;cursor:pointer;font-size:10px}
-.chat-remove:hover{background:#fce4df}
-.message.moderated{background:#eee;color:#67756b;font-style:italic}
-.mail-reply .shared-picker{max-width:480px}
-@media(max-width:540px){.shared-compose{align-items:stretch}.shared-compose>.input,.shared-compose>.shared-picker{flex-basis:100%}.shared-item{max-width:100%}}
+/* Video meetings - restricted to the existing ADF NPL director / departments. */
+.meeting-cards{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(min(100%,390px),1fr))}
+.meeting-card{display:flex;flex-direction:column;gap:11px}
+.meeting-card-head{display:flex;justify-content:space-between;align-items:start;gap:12px}
+.meeting-card h3{margin:0;color:var(--green);font-size:16px}
+.meeting-card p{margin:3px 0;line-height:1.8}
+.meeting-members{font-size:12px;overflow-wrap:anywhere}
+.meeting-setup-warning{background:#fff6e5;border:1px solid #ead5a5;padding:12px 15px;border-radius:11px;color:#744d19;margin:12px 0}
+.meeting-contacts{max-height:190px;overflow:auto;border:1px solid var(--line);padding:10px;border-radius:10px;display:grid;gap:7px}
+.meeting-contact{display:flex;align-items:center;gap:9px;font-size:13px;cursor:pointer}
+.meeting-contact small{color:var(--muted)}
+.meeting-room{display:grid;gap:16px}
+.meeting-room-head{display:flex;justify-content:space-between;gap:14px;align-items:center}
+.meeting-room-head p{font-size:12px;margin:4px 0;color:var(--muted)}
+.meeting-video-wall{background:#132d28;border-radius:16px;min-height:325px;padding:13px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:11px;align-content:start}
+.meeting-tile{position:relative;border-radius:11px;overflow:hidden;min-height:180px;background:#29483f;display:flex;align-items:center;justify-content:center;color:#fff}
+.meeting-tile-placeholder{font-size:60px;color:#b1c9b9}
+.meeting-track{display:block;width:100%;height:100%;min-height:180px;object-fit:cover;position:absolute;inset:0}
+.meeting-tile small{position:absolute;bottom:9px;right:10px;background:rgba(0,0,0,.65);padding:5px 9px;border-radius:6px;font-size:12px}
+.meeting-controls{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
+.meeting-controls .btn{min-width:145px}
+@media(max-width:620px){.meeting-video-wall{grid-template-columns:1fr}.meeting-tile{min-height:190px}.meeting-room-head{align-items:start;flex-direction:column}}
+
+.meeting-minutes-preview{background:#f5faf6;border:1px solid #d9e8da;border-radius:10px;padding:10px;font-size:12px;overflow-wrap:anywhere}
+.meeting-minutes-preview p{white-space:pre-wrap;max-height:110px;overflow:auto}
