@@ -10,6 +10,9 @@ import re
 import secrets
 import time
 import zipfile
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 import base64
 from urllib.parse import urlsplit
@@ -1855,19 +1858,98 @@ def meeting_datetime(value:datetime):
     return value.astimezone(UTC)
 
 
-def meeting_jwt(room:str,person:User):
-    """LiveKit compatible short-lived HS256 JWT; key and secret never reach browser."""
+def sign_livekit_jwt(identity:str, name:str, video_grant:dict, ttl_seconds:int=300):
+    """Short-lived LiveKit HS256 token. Only the backend can sign admin grants."""
     now=int(time.time())
-    payload={'iss':LIVEKIT_API_KEY,'sub':f'enjaz-{person.id}','name':person.full_name,
-             'iat':now,'nbf':now-5,'exp':now+300,'jti':secrets.token_urlsafe(16),
-             'video':{'roomJoin':True,'room':room,'canPublish':True,
-                      'canSubscribe':True,'canPublishData':True}}
+    payload={'iss':LIVEKIT_API_KEY,'sub':identity,'name':name,
+             'iat':now,'nbf':now-5,'exp':now+ttl_seconds,
+             'jti':secrets.token_urlsafe(16),'video':video_grant}
     header={'alg':'HS256','typ':'JWT'}
     encoded=lambda x:base64.urlsafe_b64encode(json.dumps(x,ensure_ascii=False,
                                        separators=(',',':')).encode()).rstrip(b'=').decode()
     signing=f'{encoded(header)}.{encoded(payload)}'
     signature=base64.urlsafe_b64encode(hmac.new(LIVEKIT_API_SECRET.encode(),signing.encode(),hashlib.sha256).digest()).rstrip(b'=').decode()
     return f'{signing}.{signature}'
+
+
+def meeting_jwt(room:str,person:User):
+    """Participant token: only one room and no room administration privileges."""
+    return sign_livekit_jwt(f'enjaz-{person.id}', person.full_name,
+                            {'roomJoin':True,'room':room,'canPublish':True,
+                             'canSubscribe':True,'canPublishData':True})
+
+
+class _LiveKitNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # Never forward a privileged LiveKit JWT to a redirect destination.
+
+
+def livekit_room_rpc(method:str, payload:dict, room:str):
+    """Server-only LiveKit Twirp call. No secrets or access tokens in errors/logs."""
+    # Room closure must remain possible even if video was disabled after a call.
+    parsed=urlsplit(LIVEKIT_URL)
+    if not (LIVEKIT_API_KEY and len(LIVEKIT_API_SECRET)>=24 and parsed.scheme=='wss'
+            and parsed.hostname and not parsed.username and not parsed.password
+            and parsed.path in ('','/') and not parsed.query and not parsed.fragment):
+        raise RuntimeError('livekit_not_configured')
+    if method not in {'RemoveParticipant','DeleteRoom'}:
+        raise RuntimeError('unsupported_livekit_operation')
+    parsed=urlsplit(LIVEKIT_URL)
+    endpoint=parsed._replace(scheme='https',path=f'/twirp/livekit.RoomService/{method}',
+                             query='',fragment='').geturl()
+    auth_token=sign_livekit_jwt('enjaz-server-room-control','Enjaz room controller',
+            {'roomCreate':True,'roomAdmin':True,'room':room},ttl_seconds=90)
+    request=urllib.request.Request(endpoint,
+            data=json.dumps(payload,separators=(',',':')).encode('utf-8'),
+            headers={'Authorization':'Bearer '+auth_token,
+                     'Content-Type':'application/json','Accept':'application/json'},
+            method='POST')
+    try:
+        with urllib.request.build_opener(_LiveKitNoRedirect).open(request,timeout=5) as response:
+            if response.status!=200:
+                raise RuntimeError('livekit_unexpected_status')
+            return {'ok':True}
+    except urllib.error.HTTPError as exc:
+        # Deleting a room that was never joined or was already deleted is idempotent.
+        # For RemoveParticipant, 404 is NOT accepted: token revocation is unverified.
+        if method=='DeleteRoom' and exc.code==404:
+            try:
+                error_data=json.loads(exc.read(2048).decode('utf-8'))
+                if error_data.get('code')=='not_found':
+                    return {'ok':True,'already_absent':True}
+            except (ValueError,UnicodeError,AttributeError):
+                pass
+        raise RuntimeError('livekit_remote_failure') from None
+    except (urllib.error.URLError,TimeoutError,OSError) as exc:
+        raise RuntimeError('livekit_connection_failure') from None
+
+
+def close_livekit_room(room:str, participant_ids:list[int]):
+    """Revoke ALL invitee JWT identities (including absent users), then delete room.
+
+    On LiveKit Cloud RemoveParticipant with revoke_token_ts revokes access even
+    when the invitee is not currently connected. DeleteRoom disconnects everyone.
+    Marking the meeting ended is deferred until all operations succeed.
+    """
+    cutoff=int(time.time())+1
+    failures=[]
+    # Participant RPC calls are independent; bound concurrency and wait for all.
+    def revoke(user_id):
+        return livekit_room_rpc('RemoveParticipant',
+               {'room':room,'identity':f'enjaz-{user_id}',
+                'revoke_token_ts':cutoff},room)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures=[pool.submit(revoke,user_id) for user_id in participant_ids]
+        for future in as_completed(futures):
+            try:future.result()
+            except Exception:failures.append('revoke')
+    # Even when one revocation fails, attempt DeleteRoom to stop an active call.
+    try:
+        livekit_room_rpc('DeleteRoom',{'room':room},room)
+    except Exception:
+        failures.append('delete')
+    if failures:
+        raise RuntimeError('livekit_close_incomplete')
 
 @app.get('/api/meetings/config')
 def meetings_config(s=Depends(require_login)):
@@ -1967,27 +2049,52 @@ def read_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_log
 @app.post('/api/meetings/{meeting_id}/join')
 def join_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
     m=meeting_access(db,meeting_id,s.user)
-    if m.status!='scheduled':raise HTTPException(409,'تم إلغاء أو إنهاء الاجتماع')
+    # Serialize token issuance with the organizer's close request on PostgreSQL.
+    m=db.execute(select(VideoMeeting).where(VideoMeeting.id==meeting_id)
+                 .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    if m.status!='scheduled':raise HTTPException(409,'الاجتماع منتهٍ أو جارٍ إغلاقه')
     if not video_available():raise HTTPException(503,'الاجتماعات المرئية غير مفعّلة حتى اعتماد إعداداتها الأمنية')
     starts=m.start_at.replace(tzinfo=m.start_at.tzinfo or UTC).astimezone(UTC)
     now=NOW()
     if now<starts-timedelta(minutes=15) or now>starts+timedelta(minutes=m.duration_minutes+15):
         raise HTTPException(409,'الدخول متاح قبل الاجتماع بـ15 دقيقة وحتى انتهاء الوقت المحدد')
     # Do not audit or log bearer tokens; generated anew for every authorized join.
+    token=meeting_jwt(m.room_name,s.user)
     audit(db,s.user_id,'meeting_join_authorized',f'meeting={m.id}')
     db.commit()
-    return {'server_url':LIVEKIT_URL,'token':meeting_jwt(m.room_name,s.user),
+    return {'server_url':LIVEKIT_URL,'token':token,
             'meeting_id':m.id,'sdk_url':(VIDEO_SDK_CDN if MEETINGS_ALLOW_CDN_SDK else '/assets/livekit-client.umd.min.js')}
 
 @app.post('/api/meetings/{meeting_id}/end')
 def end_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
     m=meeting_access(db,meeting_id,s.user)
     if m.organizer_id!=s.user_id:raise HTTPException(403,'يمكن لمنظّم الاجتماع فقط إنهاؤه')
-    if m.status!='scheduled':raise HTTPException(409,'هذا الاجتماع منتهٍ بالفعل')
-    m.status='ended'
-    audit(db,s.user_id,'meeting_ended',f'meeting={m.id}')
+    # Commit the gate FIRST: prevents the server issuing any new join JWTs.
+    m=db.execute(select(VideoMeeting).where(VideoMeeting.id==meeting_id)
+                 .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    if m.status=='ended':return {'ok':True,'status':'ended'}  # idempotent retry
+    if m.status not in ('scheduled','ending'):raise HTTPException(409,'لا يمكن إنهاء هذا الاجتماع')
+    m.status='ending'
     db.commit()
-    return {'ok':True}
+    participants=db.scalars(select(VideoMeetingInvitation.user_id).where(
+                    VideoMeetingInvitation.meeting_id==m.id)).all()
+    # A meeting that has never issued a LiveKit token has never had a media room.
+    # It may be safely ended without calling the provider (including if disabled).
+    ever_joined=bool(db.scalar(select(Audit.id).where(
+        Audit.action=='meeting_join_authorized',Audit.details==f'meeting={m.id}').limit(1)))
+    try:
+        if ever_joined:
+            close_livekit_room(m.room_name,participants)
+    except Exception:
+        audit(db,s.user_id,'meeting_end_retry_required',f'meeting={m.id}')
+        db.commit()
+        raise HTTPException(503,'تعذر تأكيد إغلاق غرفة الفيديو؛ تم منع دخول مستخدمين جدد. يرجى إعادة المحاولة')
+    m=db.execute(select(VideoMeeting).where(VideoMeeting.id==meeting_id)
+                 .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    m.status='ended'
+    audit(db,s.user_id,'meeting_ended_and_room_deleted',f'meeting={m.id};participants={len(participants)}')
+    db.commit()
+    return {'ok':True,'status':'ended','participants_revoked':len(participants)}
 
 class MeetingMinutesBody(BaseModel):
     text: str = Field(default='',max_length=8000)
