@@ -1031,7 +1031,7 @@ async function renderRegistrations(){
  const rolesOptions=[['employee','موظف'],['head','رئيس قسم'],['advisor','مستشار القطاع']];
  renderShell('طلبات التسجيل الجديدة','<div class="page-head"><div><h2>طلبات التسجيل والتحقق من البريد</h2>'+
   '<p>تظهر فقط الطلبات التي اجتازت رمز التحقق. لا يُنشأ حساب نشط قبل مراجعتك والموافقة.</p></div>'+
-  '<button id="reloadRegistrations" class="btn secondary">↻ تحديث الطلبات</button></div>'+
+  '<div class="action-row"><button id="testRegistrationEmail" class="btn secondary">✉ اختبار إرسال البريد إلى بريدي</button><button id="reloadRegistrations" class="btn secondary">↻ تحديث الطلبات</button></div></div>'+
   '<div class="registration-stats">'+Object.entries(counts).map(([k,n])=>
    '<div class="stat"><span>'+registrationStatuses[k]+'</span><div class="metric">'+n+'</div></div>').join('')+'</div>'+
   '<div class="panel"><div class="filters"><label>الحالة <select id="registrationStatusFilter" class="input">'+
@@ -1104,6 +1104,11 @@ async function renderRegistrations(){
    await renderRegistrations();toast('أُرسل رابط التفعيل الجديد');
   }));
  };
+ $('testRegistrationEmail').onclick=request(async()=>{
+  if(!window.confirm('إرسال رسالة اختبار إلى بريد حسابك الحالي فقط؟'))return;
+  const result=await api('/registrations/test-email',{method:'POST'});
+  toast(result.message||'أُرسلت رسالة الاختبار');
+ });
  $('reloadRegistrations').onclick=request(()=>renderRegistrations());
  $('registrationStatusFilter').value=state.registrationTab;
  $('registrationStatusFilter').onchange=e=>{state.registrationTab=e.target.value;draw()};
