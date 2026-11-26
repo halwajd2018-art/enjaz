@@ -346,14 +346,14 @@ MANAGER_ROLES = ('director','advisor','head')
 PERMISSION_REGISTRY = {
     'meetings.create': ('الاجتماعات', 'جدولة اجتماع جديد', ALL_ROLES, 'adjustable', 'مع الالتزام بنطاق دعوة المشاركين'),
     'meetings.join': ('الاجتماعات', 'الدخول إلى اجتماع مدعو إليه', ALL_ROLES, 'adjustable', 'بدعوة صريحة وضمن توقيت الاجتماع'),
-    'meetings.end': ('الاجتماعات', 'إنهاء الاجتماع للجميع', ALL_ROLES, 'adjustable', 'منظم الاجتماع فقط'),
+    'meetings.end': ('الاجتماعات', 'إنهاء الاجتماع للجميع', ALL_ROLES, 'locked', 'حق إغلاق للطوارئ، لمنظم الاجتماع فقط'),
     'meetings.minutes': ('الاجتماعات', 'كتابة محضر الاجتماع', ALL_ROLES, 'adjustable', 'منظم الاجتماع فقط'),
     'calls.start.audio': ('الاتصالات المباشرة', 'بدء مكالمة صوتية', ALL_ROLES, 'adjustable', 'مع التقيد بنطاق الدعوات'),
     'calls.start.video': ('الاتصالات المباشرة', 'بدء مكالمة مرئية', ALL_ROLES, 'adjustable', 'مع التقيد بنطاق الدعوات'),
     'calls.accept': ('الاتصالات المباشرة', 'قبول مكالمة واردة', ALL_ROLES, 'adjustable', 'المستخدم المدعو فقط'),
     'calls.join': ('الاتصالات المباشرة', 'الدخول إلى مكالمة مقبولة', ALL_ROLES, 'adjustable', 'يشترط قبول الدعوة'),
     'calls.invite': ('الاتصالات المباشرة', 'إضافة مشاركين إلى مكالمة', ALL_ROLES, 'adjustable', 'منشئ المكالمة فقط'),
-    'calls.end': ('الاتصالات المباشرة', 'إنهاء المكالمة للجميع', ALL_ROLES, 'adjustable', 'منشئ المكالمة فقط'),
+    'calls.end': ('الاتصالات المباشرة', 'إنهاء المكالمة للجميع', ALL_ROLES, 'locked', 'حق إغلاق للطوارئ، لمنشئ المكالمة فقط'),
     'chat.send': ('المحادثات', 'إرسال رسالة نصية', ALL_ROLES, 'adjustable', 'قنوات المستخدم المصرح بها فقط'),
     'chat.upload': ('المحادثات', 'إرسال مرفق في الدردشة', ALL_ROLES, 'adjustable', 'حدود أنواع الملفات والحجم قائمة'),
     'chat.moderate': ('المحادثات', 'الإشراف وحجب الرسائل', MANAGER_ROLES, 'adjustable', 'حسب نطاق الإشراف الأصلي'),
@@ -637,6 +637,7 @@ class UserDeleteBody(BaseModel):
 class PermissionOverridesUpdate(BaseModel):
     # Unspecified keys are unchanged; 'inherit' deletes the override.
     decisions: dict[str,str] = Field(min_length=1,max_length=40)
+    reason: str = Field(min_length=5,max_length=500)
 
 class DepartmentRenameBody(BaseModel):
     name: str = Field(min_length=2, max_length=160)
@@ -803,6 +804,8 @@ def update_user_permissions(user_id:int,data:PermissionOverridesUpdate,
             raise HTTPException(422,'قيمة تفويض غير معتمدة')
         if choice=='allow' and target.role not in spec[2]:
             raise HTTPException(422,'لا يمكن منح هذه الصلاحية خارج المستوى الإداري المصرح')
+    reason=data.reason.strip()
+    if len(reason)<5:raise HTTPException(422,'سبب التعديل مطلوب (5 أحرف على الأقل)')
     changed=[]
     for code,choice in data.decisions.items():
         row=db.scalar(select(UserPermissionOverride).where(
@@ -822,7 +825,7 @@ def update_user_permissions(user_id:int,data:PermissionOverridesUpdate,
         changed.append(f'{code}:{previous}->{choice}')
     if changed:
         audit(db,s.user_id,'user_permissions_changed',
-              f'user={target.id};'+','.join(changed))
+              f'user={target.id};reason={reason};'+','.join(changed))
         db.commit()
     return {'ok':True,'updated':len(changed),
             'user':user_data(target),
