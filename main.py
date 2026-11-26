@@ -8,6 +8,9 @@ import mimetypes
 import os
 import re
 import secrets
+import smtplib
+import ssl
+from email.message import EmailMessage
 import time
 import zipfile
 import urllib.error
@@ -318,6 +321,38 @@ class DirectCallMember(Base):
     invited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
     accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+
+class RegistrationRequest(Base):
+    """Email-verified applicant awaiting explicit director approval."""
+    __tablename__ = 'registration_requests'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    email: Mapped[str] = mapped_column(String(200), unique=True, index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default='otp_pending', index=True)
+    otp_nonce: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    otp_digest: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    otp_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    otp_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[Optional[int]] = mapped_column(ForeignKey('users.id'), nullable=True)
+    role: Mapped[Optional[str]] = mapped_column(String(25), nullable=True)
+    department_id: Mapped[Optional[int]] = mapped_column(ForeignKey('departments.id'), nullable=True)
+    rejection_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey('users.id'), nullable=True, unique=True)
+    activation_digest: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    activation_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class RegistrationSendAttempt(Base):
+    __tablename__ = 'registration_send_attempts'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email_digest: Mapped[str] = mapped_column(String(64), index=True)
+    client_digest: Mapped[str] = mapped_column(String(64), index=True)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW, index=True)
+
 class LoginAttempt(Base):
     __tablename__ = 'login_attempts'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -507,6 +542,29 @@ def task_data(task, db):
     au = db.get(User, task.assigned_to)
     dept = db.get(Department, task.department_id)
     return {'assignee_removed': db.get(UserRemoval, task.assigned_to) is not None, 'id':task.id,'title':task.title,'description':task.description,'output':task.output,'result_text':task.result_text,'department_id':task.department_id,'department':dept.name if dept else '', 'assigned_to':task.assigned_to,'assignee':au.full_name if au else '', 'created_by':task.created_by,'priority':task.priority,'status':task.status,'due_date':task.due_date.isoformat(),'created_at':iso(task.created_at),'updated_at':iso(task.updated_at),'progress':progress(task),'steps':[{'id':s.id,'title':s.title,'weight':s.weight,'done':s.done} for s in task.steps]}
+
+
+class RegistrationStartBody(BaseModel):
+    full_name: str = Field(min_length=2, max_length=160)
+    email: str = Field(min_length=5, max_length=200)
+
+class RegistrationEmailBody(BaseModel):
+    email: str = Field(min_length=5, max_length=200)
+
+class RegistrationVerifyBody(BaseModel):
+    email: str = Field(min_length=5, max_length=200)
+    code: str = Field(min_length=6, max_length=6)
+
+class RegistrationApprovalBody(BaseModel):
+    role: str = Field(min_length=4, max_length=12)
+    department_id: Optional[int] = None
+
+class RegistrationRejectionBody(BaseModel):
+    reason: str = Field(min_length=5, max_length=500)
+
+class RegistrationActivationBody(BaseModel):
+    token: str = Field(min_length=32, max_length=150)
+    password: str = Field(min_length=12, max_length=128)
 
 class LoginBody(BaseModel):
     email: str = Field(min_length=3, max_length=200)
