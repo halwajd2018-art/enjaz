@@ -189,3 +189,24 @@
 .room-chat-panel .shared-file-link{word-break:break-word}
 .modal .room-chat-panel{position:static;max-height:65vh}
 @media(max-width:1050px){.session-room-layout{grid-template-columns:minmax(0,1fr)}.room-chat-panel{position:static;max-height:none}.room-chat-messages{max-height:320px}}
+
+
+/* Self-registration and director-controlled approval queue. */
+.registration-card{max-width:520px}
+.registration-entry{border-top:1px solid var(--line);margin-top:16px;padding-top:15px;text-align:center}
+.registration-entry p{font-size:12px;color:var(--muted);margin:0 0 8px}
+.registration-address{padding:10px 12px;background:#f4f9f6;border:1px solid var(--line);border-radius:8px;overflow-wrap:anywhere;text-align:center;direction:ltr}
+.registration-otp{font-size:23px;font-weight:700;text-align:center;letter-spacing:7px;font-variant-numeric:tabular-nums}
+.registration-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 16px}
+.registration-stats .stat{min-width:0}
+.registration-stats .metric{font-size:26px}
+.registration-list{display:grid;gap:10px}
+.registration-request{border:1px solid var(--line);border-radius:13px;padding:15px;background:#fff}
+.registration-request-head{display:flex;align-items:flex-start;justify-content:space-between;gap:15px;flex-wrap:wrap}
+.registration-request-head h3{font-size:15px;margin:0 0 4px}
+.registration-request-head p{font-size:11px;color:var(--muted);margin:0 0 12px;overflow-wrap:anywhere}
+.registration-review-form{display:grid;gap:12px;background:#f8faf8;border-radius:10px;padding:12px}
+.registration-classification{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.registration-review-form .action-row{margin:0}
+@media(max-width:850px){.registration-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:540px){.registration-classification{grid-template-columns:1fr}.registration-stats .stat span{font-size:11px}.registration-request-head{display:block}}

@@ -1,6 +1,6 @@
 'use strict';
 const root=document.getElementById('root');
-const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false};
+const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false,registrationPending:0,registrationTab:'awaiting_approval'};
 const $=id=>document.getElementById(id);
 const safe=s=>String(s===null||s===undefined?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=dt=>dt?new Date(dt).toLocaleString('ar-SA',{dateStyle:'short',timeStyle:'short',timeZone:'Asia/Riyadh'}):'—';
@@ -88,8 +88,8 @@ async function populateAttachments(taskId){
   }catch(e){const el=$('taskAttachments');if(el)el.innerHTML=`<p class="error">${safe(e.message)}</p>`}
 }
 function request(fn){return async(...rgs)=>{try{await fn(...rgs)}catch(e){toast(e.message||'حدث خطأ')}}}
-async function init(){try{const data=await api('/me');state.me=data.user;state.csrf=data.csrf;await loadAll();startBackground();render()}catch(e){renderLogin()}}
-async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices,organization]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications'),api('/organization')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:false,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}
+async function init(){const token=activationTokenFromLocation();if(token){renderActivationSetup(token);return}try{const data=await api('/me');state.me=data.user;state.csrf=data.csrf;await loadAll();startBackground();render()}catch(e){renderLogin()}}
+async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices,organization,registrationCount]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications'),api('/organization'),state.me?.role==='director'?api('/registrations/count'):Promise.resolve({pending:0})]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,registrationPending:registrationCount.pending||0,organizationRefreshPending:false,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}
 async function pollOrganization(){if(!state.me)return;const organization=await api('/organization');if(organization.revision!==state.organization.revision){const [users,departments,tasks,dashboard,presence]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:true});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}if(state.organizationRefreshPending&&!state.videoRoom&&!state.directRoom&&!document.querySelector('.modal-cover')&&!document.hidden){state.organizationRefreshPending=false;render();}}
 const noticeKinds={assigned:'تكليف جديد',review:'مهمة مكتملة تنتظر المراجعة',completed:'تم اعتماد المهمة واكتمالها',revision:'أُعيدت المهمة للتعديل',cancelled:'تم إلغاء التكليف'};
 function syncNoticeBadges(){
@@ -107,7 +107,20 @@ async function pollNotifications(quiet=false){
  document.querySelectorAll('[data-page="meetings"]').forEach(btn=>{btn.querySelector('[data-meeting-badge]')?.remove();if(state.meetingUnread){const n=document.createElement('b');n.className='mail-badge';n.dataset.meetingBadge='';n.textContent=state.meetingUnread;btn.appendChild(n)}});
  if(!quiet&&state.noticeInitialized&&data.total_unread>old)toast('لديك إشعارات جديدة: رسالة أو محادثة أو تحديث مهمة');
  state.noticeInitialized=true;
+ if(state.me?.role==='director')pollRegistrationCount().catch(()=>{});
  pollOrganization().catch(()=>{});
+}
+async function pollRegistrationCount(){
+ if(!state.me||state.me.role!=='director')return;
+ const value=await api('/registrations/count');
+ state.registrationPending=Number(value.pending||0);
+ document.querySelectorAll('[data-page="registrations"]').forEach(b=>{
+  b.querySelector('[data-registration-badge]')?.remove();
+  if(state.registrationPending){
+   const span=document.createElement('b');span.className='mail-badge';span.dataset.registrationBadge='';
+   span.textContent=state.registrationPending;b.appendChild(span);
+  }
+ });
 }
 function notificationCenterHtml(data){
  const ev=data.events||[];
@@ -128,17 +141,18 @@ function openNotificationCenter(){
  }));
  document.querySelectorAll('[data-notice-chat]').forEach(btn=>btn.onclick=()=>{const ch=btn.dataset.noticeChat;closeModal();state.page='chat';state.channel=ch;render()});
 }
-function renderLogin(){stopRoomChat();stopBackground();document.getElementById('directIncoming')?.remove();state.directCalls=[];root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p></div></div>`;
+function renderLogin(){stopRoomChat();stopBackground();document.getElementById('directIncoming')?.remove();state.directCalls=[];root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p><div id="registrationStartEntry"></div></div></div>`;
+ loadRegistrationEntry().catch(()=>{});
  $('loginForm').onsubmit=request(async e=>{e.preventDefault();let fd=new FormData(e.currentTarget);let btn=e.currentTarget.querySelector('button');btn.disabled=true;try{let response=await api('/auth/login',{method:'POST',data:{email:fd.get('email'),password:fd.get('password')}});state.me=response.user;state.csrf=response.csrf;state.page='dashboard';state.noticeInitialized=false;await loadAll();startBackground();render();if(state.me.must_change_password)changePasswordModal(true)}catch(error){$('loginError').textContent=error.message}finally{btn.disabled=false}});
 }
-function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['calls','📞','الاتصالات المباشرة'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director'))}
-function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}${id==='meetings'&&state.meetingUnread?`<b class="mail-badge" data-meeting-badge>${state.meetingUnread}</b>`:''}${id==='calls'&&state.directCalls.some(c=>c.incoming)?`<b class="mail-badge" data-call-badge>●</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
+function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['calls','📞','الاتصالات المباشرة'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['registrations','✍','طلبات التسجيل الجديدة'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director')&&(x[0]!=='registrations'||state.me.role==='director'))}
+function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}${id==='meetings'&&state.meetingUnread?`<b class="mail-badge" data-meeting-badge>${state.meetingUnread}</b>`:''}${id==='calls'&&state.directCalls.some(c=>c.incoming)?`<b class="mail-badge" data-call-badge>●</b>`:''}${id==='registrations'&&state.registrationPending?`<b class="mail-badge" data-registration-badge>${state.registrationPending}</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
  document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال أولًا');return}if(state.videoRoom)leaveVideoMeeting();stopRoomChat();state.page=btn.dataset.page;state.selectedTask=null;render()});
  $('logoutBtn').onclick=request(async()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال قبل تسجيل الخروج');return}await leaveVideoMeeting();await api('/auth/logout',{method:'POST'});state.me=null;state.csrf=null;renderLogin()});
  $('changePwBtn').onclick=()=>changePasswordModal(false);$('changeEmailBtn').onclick=()=>changeEmailModal();$('notificationBell').onclick=()=>openNotificationCenter();
 }
 function render(){if(!state.me)return renderLogin();if(state.page!=='chat'&&state.chatTimer){clearInterval(state.chatTimer);state.chatTimer=null}
- switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'calls':return renderDirectCalls();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'audit':return renderAudit();default:return renderDashboard()}}
+ switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'calls':return renderDirectCalls();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'registrations':return renderRegistrations();case'audit':return renderAudit();default:return renderDashboard()}}
 function cards(){const d=state.dashboard;return `<div class="cards">${[['إجمالي التكليفات',d.total||0,'مهمة مسجلة'],['المهام المكتملة',d.done||0,'معتمدة نهائيًا'],['المهام المتأخرة',d.late||0,'تحتاج متابعة'],['متوسط الإنجاز',(d.progress||0)+'%','متوسط الأوزان']].map(([title,val,sub])=>`<div class="stat"><span>${title}</span><div class="metric">${val}</div><small>${sub}</small></div>`).join('')}</div>`}
 function status(t){return `<span class="pill ${safe(t.status)}">${safe(statuses[t.status]||t.status)}</span>`}
 function miniTask(t){return `<div class="task-card">${t.assignee_removed&&t.status!=='done'?'<p class="error">⚠ الموظف محذوف — تتطلب إعادة إسناد</p>':''}<div class="detail-head"><div class="task-title">${safe(t.title)}</div>${status(t)}</div><div class="task-desc">${safe(t.assignee)} · ${safe(t.department)}</div><div class="task-meta"><span class="pill ${safe(t.priority)}">${safe(priorities[t.priority])}</span><span class="hint">الاستحقاق: ${fdate(t.due_date)}</span><b>${t.progress}%</b></div><div class="bar"><span style="width:${t.progress}%"></span></div><div class="action-row"><button class="btn secondary small" data-task="${t.id}">فتح المهمة</button></div></div>`}
@@ -900,4 +914,225 @@ async function inviteMoreDirectParticipants(callId){
   await api('/calls/'+callId+'/invite',{method:'POST',data:{invitee_ids:ids}});
   closeModal();await pollDirectCalls();toast('أُرسلت الدعوات الجديدة');
  });
+}
+
+
+
+// Self-registration entry is disabled until SMTP/OTP are configured by admin.
+// No unauthenticated user can obtain a session before approval and activation.
+function activationTokenFromLocation(){
+ const raw=window.location.hash||'';
+ if(!raw.startsWith('#activate='))return null;
+ let token='';
+ try{token=decodeURIComponent(raw.slice('#activate='.length))}catch{}
+ // Don't leave the one-time token in URL/history, server logs or analytics.
+ history.replaceState(null,'',window.location.pathname+window.location.search);
+ return token&&token.length<=150?token:null;
+}
+async function loadRegistrationEntry(){
+ const info=await api('/registration/config');
+ if(!info.registration_enabled)return;
+ const wrapper=$('registrationStartEntry');
+ if(!wrapper||state.me)return;
+ wrapper.innerHTML='<div class="registration-entry"><p>ليس لديك حساب بعد؟</p>'+
+  '<button id="openRegistration" type="button" class="btn secondary full">طلب التسجيل في إنجاز</button></div>';
+ $('openRegistration').onclick=renderRegistrationStart;
+}
+function renderRegistrationStart(){
+ if(state.me)return;
+ root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
+  '<div class="logo-big">إنجاز</div><h1>طلب تسجيل جديد</h1>'+
+  '<p class="hint">التحقق من البريد خطوة أولى. لا يمكن الدخول حتى موافقة مدير المنصة وتصنيف الحساب.</p>'+
+  '<form id="selfRegistrationForm" class="form-stack">'+
+  '<label class="form-field">الاسم الكامل<input name="full_name" class="input" minlength="2" maxlength="160" required autocomplete="name"></label>'+
+  '<label class="form-field">البريد الإلكتروني<input name="email" class="input" type="email" maxlength="200" required autocomplete="email"></label>'+
+  '<div id="registrationError" class="error" role="alert"></div>'+
+  '<button class="btn full" type="submit">إرسال رمز التحقق</button></form>'+
+  '<button id="backToLogin" type="button" class="btn outline full">العودة لتسجيل الدخول</button></div></div>';
+ $('backToLogin').onclick=renderLogin;
+ $('selfRegistrationForm').onsubmit=async e=>{
+  e.preventDefault();
+  const form=e.currentTarget;
+  const name=form.elements.full_name.value.trim();
+  const email=form.elements.email.value.trim().toLowerCase();
+  const button=form.querySelector('[type="submit"]');button.disabled=true;
+  try{
+   await api('/registration/start',{method:'POST',data:{full_name:name,email}});
+   renderRegistrationVerify(email);
+  }catch(err){$('registrationError').textContent=err.message}
+  finally{button.disabled=false}
+ };
+}
+function renderRegistrationVerify(email){
+ if(state.me)return;
+ root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
+  '<div class="logo-big">✉</div><h1>تأكيد البريد الإلكتروني</h1>'+
+  '<p class="hint">إذا كان البريد جديدًا وطلبه قيد التحقق فستصلك رسالة برمز من 6 أرقام صالح لعشر دقائق. الحسابات المسجلة والطلبات المحسومة لا تحصل على رمز جديد.</p>'+
+  '<p class="registration-address">'+safe(email)+'</p>'+
+  '<form id="registrationVerifyForm" class="form-stack">'+
+  '<label class="form-field">رمز التحقق<input name="code" type="text" class="input registration-otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required dir="ltr"></label>'+
+  '<div id="registrationError" class="error" role="alert"></div>'+
+  '<button class="btn full" type="submit">تأكيد الرمز وإرسال الطلب للمدير</button></form>'+
+  '<button id="resendRegistration" type="button" class="btn secondary full">إعادة إرسال الرمز</button>'+
+  '<button id="backToLogin" type="button" class="btn outline full">العودة لتسجيل الدخول</button></div></div>';
+ $('backToLogin').onclick=renderLogin;
+ $('registrationVerifyForm').onsubmit=async e=>{
+  e.preventDefault();
+  const btn=e.currentTarget.querySelector('[type="submit"]');btn.disabled=true;
+  try{
+   await api('/registration/verify',{method:'POST',data:{email,code:e.currentTarget.elements.code.value}});
+   renderRegistrationSuccess();
+  }catch(err){$('registrationError').textContent=err.message}
+  finally{btn.disabled=false}
+ };
+ $('resendRegistration').onclick=request(async()=>{
+  await api('/registration/resend',{method:'POST',data:{email}});
+  toast('إذا كان طلبك متاحًا، أُعيد إرسال الرمز. تحقق من بريدك');
+ });
+}
+function renderRegistrationSuccess(){
+ root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
+  '<div class="logo-big">✓</div><h1>تم تأكيد البريد الإلكتروني</h1>'+
+  '<p class="note">طلب التسجيل بانتظار موافقة مدير المنصة وتحديد المستوى الإداري والقسم.</p>'+
+  '<p class="hint">ستصل إلى بريدك رسالة تفعيل عند الموافقة؛ التحقق من البريد لا يسمح بالدخول قبل الاعتماد.</p>'+
+  '<button id="backToLogin" class="btn full">العودة لتسجيل الدخول</button></div></div>';
+ $('backToLogin').onclick=renderLogin;
+}
+function renderActivationSetup(token){
+ root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
+  '<div class="logo-big">🔒</div><h1>تفعيل حساب إنجاز</h1>'+
+  '<p class="hint">بعد موافقة مدير المنصة، عيّن كلمة مرور شخصية من 12 حرفًا على الأقل. رابط التفعيل يُستخدم مرة واحدة.</p>'+
+  '<form id="activationForm" class="form-stack">'+
+  '<label class="form-field">كلمة المرور<input name="password" type="password" class="input" minlength="12" maxlength="128" autocomplete="new-password" required></label>'+
+  '<label class="form-field">تأكيد كلمة المرور<input name="confirm" type="password" class="input" minlength="12" maxlength="128" autocomplete="new-password" required></label>'+
+  '<p class="error" id="activationError" role="alert"></p><button class="btn full" type="submit">تعيين كلمة المرور وتفعيل الحساب</button></form>'+
+  '<button id="backToLogin" type="button" class="btn outline full">العودة لتسجيل الدخول</button></div></div>';
+ $('backToLogin').onclick=renderLogin;
+ $('activationForm').onsubmit=async e=>{
+  e.preventDefault();
+  const form=e.currentTarget,pw=form.elements.password.value;
+  if(pw!==form.elements.confirm.value){$('activationError').textContent='كلمتا المرور غير متطابقتين';return}
+  const btn=form.querySelector('[type="submit"]');btn.disabled=true;
+  try{
+   await api('/registration/activate',{method:'POST',data:{token,password:pw}});
+   renderLogin();toast('تم تفعيل الحساب. سجّل الدخول ببريدك وكلمة المرور الجديدة');
+  }catch(err){$('activationError').textContent=err.message}
+  finally{btn.disabled=false}
+ };
+}
+const registrationStatuses={awaiting_approval:'بانتظار الموافقة',approved:'معتمد وينتظر تعيين كلمة المرور',active:'تم التفعيل',rejected:'مرفوض'};
+async function renderRegistrations(){
+ if(state.me?.role!=='director'){state.page='dashboard';renderDashboard();return}
+ const response=await api('/registrations');
+ state.registrationPending=response.pending||0;
+ if(state.page!=='registrations')return;
+ const items=response.items||[];
+ const counts=Object.fromEntries(Object.keys(registrationStatuses).map(k=>[k,items.filter(x=>x.status===k).length]));
+ const rolesOptions=[['employee','موظف'],['head','رئيس قسم'],['advisor','مستشار القطاع']];
+ renderShell('طلبات التسجيل الجديدة','<div class="page-head"><div><h2>طلبات التسجيل والتحقق من البريد</h2>'+
+  '<p>تظهر فقط الطلبات التي اجتازت رمز التحقق. لا يُنشأ حساب نشط قبل مراجعتك والموافقة.</p></div>'+
+  '<div class="action-row"><button id="testRegistrationEmail" class="btn secondary">✉ اختبار إرسال البريد إلى بريدي</button><button id="reloadRegistrations" class="btn secondary">↻ تحديث الطلبات</button></div></div>'+
+  '<div class="registration-stats">'+Object.entries(counts).map(([k,n])=>
+   '<div class="stat"><span>'+registrationStatuses[k]+'</span><div class="metric">'+n+'</div></div>').join('')+'</div>'+
+  '<div class="panel"><form id="diagnoseRegistrationForm" class="form-stack">'+
+  '<h3>فحص حالة بريد طلب التسجيل</h3><p class="hint">للمدير فقط: معرفة ما إذا كان البريد مرتبطًا بحساب أو بطلب قائم، دون كشف أي رمز.</p>'+
+  '<div class="action-row"><input class="input" name="email" type="email" maxlength="200" placeholder="البريد المستخدم في التسجيل" required style="flex:1;min-width:180px">'+
+  '<button class="btn secondary" type="submit">فحص البريد</button></div></form><div id="registrationDiagnosis" class="hint" aria-live="polite"></div></div>'+
+  '<div class="panel"><div class="filters"><label>الحالة <select id="registrationStatusFilter" class="input">'+
+  '<option value="all">جميع الحالات</option>'+
+  Object.entries(registrationStatuses).map(([key,label])=>'<option value="'+key+'" '+(state.registrationTab===key?'selected':'')+'>'+label+'</option>').join('')+
+  '</select></label></div><div id="registrationList" class="registration-list"></div></div>'+
+  '<p class="footer-note">التحقق من البريد لا يثبت الهوية الوظيفية. راجع بيانات المتقدم قبل تعيينه رئيس قسم أو مستشار قطاع. لا يُسمح بالتسجيل الذاتي بمستوى مدير عام.</p>');
+ const draw=()=>{
+  const filtered=items.filter(x=>state.registrationTab==='all'||x.status===state.registrationTab);
+  $('registrationList').innerHTML=filtered.length?filtered.map(x=>{
+   const status=registrationStatuses[x.status]||x.status;
+   const control=x.status==='awaiting_approval'?
+    '<form class="registration-review-form" data-registration-form="'+x.id+'">'+
+    '<div class="registration-classification">'+
+    '<label class="form-field">المستوى الإداري<select name="role" class="input" data-register-role="'+x.id+'">'+
+      rolesOptions.map(([key,label])=>'<option value="'+key+'">'+label+'</option>').join('')+'</select></label>'+
+    '<label class="form-field" data-register-dept-field="'+x.id+'">القسم<select name="department_id" class="input">'+
+      state.departments.map(d=>'<option value="'+d.id+'">'+safe(d.name)+'</option>').join('')+'</select></label></div>'+
+    '<div class="action-row"><button type="submit" class="btn">الموافقة وإرسال التفعيل</button>'+
+    '<button type="button" class="btn danger" data-reject-registration="'+x.id+'">رفض الطلب</button></div></form>'
+    :x.status==='approved'?
+    '<p class="hint">المستوى: '+safe(roles[x.role]||x.role)+' · '+safe(x.department||'ارتباط مستقل')+
+    '</p><button class="btn secondary small" data-resend-activation="'+x.id+'">إعادة إرسال رابط التفعيل</button>'
+    :x.status==='rejected'?'<p class="hint">سبب الرفض: '+safe(x.rejection_reason||'—')+'</p>':
+    '<p class="hint">المستوى: '+safe(roles[x.role]||x.role)+' · '+safe(x.department||'ارتباط مستقل')+'</p>';
+   return '<article class="registration-request"><div class="registration-request-head"><div>'+
+    '<h3>'+safe(x.name)+'</h3><p>'+safe(x.email)+' · طلب بتاريخ '+fmt(x.created_at)+
+    ' · تأكيد البريد '+fmt(x.email_verified_at)+'</p></div><span class="pill '+(x.status==='active'?'done':'working')+'">'+status+'</span></div>'+control+'</article>';
+  }).join(''):'<p class="hint">لا توجد طلبات مطابقة للحالة المحددة.</p>';
+  $('registrationList').querySelectorAll('[data-registration-form]').forEach(form=>{
+   const id=Number(form.dataset.registrationForm),roleSelect=form.querySelector('[name="role"]');
+   const deptField=form.querySelector('[data-register-dept-field]');
+   const deptSelect=form.querySelector('[name="department_id"]');
+   const sync=()=>{
+    deptField.hidden=roleSelect.value==='advisor';
+    deptSelect.disabled=roleSelect.value==='advisor';
+    [...deptSelect.options].forEach(o=>{
+     o.disabled=roleSelect.value==='head'&&Number(o.value)===state.organization.general_department_id;
+    });
+    if(deptSelect.selectedOptions[0]?.disabled)deptSelect.selectedIndex=[...deptSelect.options].findIndex(o=>!o.disabled);
+   };
+   roleSelect.onchange=sync;sync();
+   form.onsubmit=request(async e=>{
+    e.preventDefault();const role=roleSelect.value;
+    const department_id=role==='advisor'?null:Number(deptSelect.value);
+    if(role!=='advisor'&&(!department_id||deptSelect.selectedOptions[0]?.disabled))throw Error('اختر قسمًا صالحًا للمستوى الإداري');
+    if(!window.confirm('اعتماد حساب '+items.find(x=>x.id===id)?.name+' بالمستوى المحدد وإرسال رابط تعيين كلمة المرور؟'))return;
+    const btn=form.querySelector('[type="submit"]');btn.disabled=true;
+    try{
+     await api('/registrations/'+id+'/approve',{method:'POST',data:{role,department_id}});
+     await renderRegistrations();toast('تمت الموافقة وإرسال رابط التفعيل إلى البريد');
+    }catch(err){await renderRegistrations().catch(()=>{});throw err}
+    finally{btn.disabled=false}
+   });
+  });
+  $('registrationList').querySelectorAll('[data-reject-registration]').forEach(b=>b.onclick=()=>{
+   const id=Number(b.dataset.rejectRegistration),person=items.find(x=>x.id===id);
+   modal('رفض طلب تسجيل '+(person?.name||''),'<form id="registrationRejectForm" class="form-stack">'+
+    '<label class="form-field">سبب رفض الطلب<textarea class="input" name="reason" rows="3" minlength="5" maxlength="500" required></textarea></label>'+
+    '<button type="submit" class="btn danger">تأكيد الرفض</button></form>');
+   $('registrationRejectForm').onsubmit=request(async e=>{
+    e.preventDefault();const reason=e.currentTarget.elements.reason.value.trim();
+    if(reason.length<5)throw Error('أدخل سبب رفض من خمسة أحرف على الأقل');
+    await api('/registrations/'+id+'/reject',{method:'POST',data:{reason}});
+    closeModal();await renderRegistrations();toast('تم رفض الطلب وتوثيق القرار');
+   });
+  });
+  $('registrationList').querySelectorAll('[data-resend-activation]').forEach(b=>b.onclick=request(async()=>{
+   await api('/registrations/'+b.dataset.resendActivation+'/resend-activation',{method:'POST'});
+   await renderRegistrations();toast('أُرسل رابط التفعيل الجديد');
+  }));
+ };
+ $('testRegistrationEmail').onclick=request(async()=>{
+  if(!window.confirm('إرسال رسالة اختبار إلى بريد حسابك الحالي فقط؟'))return;
+  const result=await api('/registrations/test-email',{method:'POST'});
+  toast(result.message||'أُرسلت رسالة الاختبار');
+ });
+ $('diagnoseRegistrationForm').onsubmit=request(async e=>{
+  e.preventDefault();
+  const form=e.currentTarget;
+  const email=form.elements.email.value.trim();
+  const target=$('registrationDiagnosis');
+  const info=await api('/registrations/diagnose',{method:'POST',data:{email}});
+  const stateLabels={existing_account:'حساب موجود',registration_request:'طلب مسجل',not_found:'لا يوجد سجل'};
+  let infoLine='<b>'+safe(stateLabels[info.state]||info.state)+'</b> — '+safe(info.message);
+  if(info.state==='registration_request'){
+   const stateName=registrationStatuses[info.status]||info.status;
+   infoLine+='<p>حالة الطلب: '+safe(stateName)+' · آخر محاولة إرسال: '+fmt(info.last_sent_at)+
+     ' · انتهاء الرمز: '+fmt(info.otp_expires_at)+'</p>';
+  }
+  if(info.state==='existing_account'){
+   infoLine+='<p>الحساب '+(info.active?'نشط':'غير نشط')+'. استخدم بريدًا جديدًا لاختبار التسجيل.</p>';
+  }
+  target.innerHTML='<div class="note">'+infoLine+'</div>';
+ });
+ $('reloadRegistrations').onclick=request(()=>renderRegistrations());
+ $('registrationStatusFilter').value=state.registrationTab;
+ $('registrationStatusFilter').onchange=e=>{state.registrationTab=e.target.value;draw()};
+ draw();
 }
