@@ -840,6 +840,7 @@ def get_organization(db: Session=Depends(get_db),s=Depends(require_login)):
 @app.patch('/api/departments/{department_id}')
 def rename_department(department_id: int, data: DepartmentRenameBody,
                       db: Session=Depends(get_db), s=Depends(require_login)):
+    require_permission(db,s.user,'organization.departments')
     if s.user.role != 'director':
         raise HTTPException(403, 'تعديل أسماء الأقسام متاح للمدير العام فقط')
     dept = db.scalar(select(Department).where(Department.id == department_id).with_for_update())
@@ -863,6 +864,7 @@ def rename_department(department_id: int, data: DepartmentRenameBody,
 @app.patch('/api/organization/role-labels')
 def rename_role_labels(data: RoleLabelsBody, db: Session=Depends(get_db),
                        s=Depends(require_login)):
+    require_permission(db,s.user,'organization.levels')
     if s.user.role != 'director':
         raise HTTPException(403, 'تعديل مسميات المستويات الإدارية متاح للمدير العام فقط')
     labels = {role: normalized_organization_label(getattr(data, role), 80)
@@ -909,6 +911,7 @@ def require_free_department_head(db: Session, department_id: int):
 
 @app.patch('/api/users/{user_id}/role')
 def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get_db), s=Depends(require_login)):
+    require_permission(db,s.user,'users.change_role')
     """Director controls advisor appointments; advisor may manage heads/employees, not other advisors."""
     me = s.user
     if not is_executive(me):
@@ -975,6 +978,7 @@ def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get
 
 @app.post('/api/users',status_code=201)
 def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'users.create')
     me=s.user
     if me.role not in ('head','director'):raise HTTPException(403,'الصلاحية غير متاحة')
     if data.role not in ('head','employee','advisor') or (me.role=='head' and data.role!='employee'):
@@ -996,6 +1000,7 @@ def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_
 
 @app.patch('/api/users/{user_id}')
 def edit_user(user_id:int,data:UserEdit,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'users.edit')
     me=s.user;u=db.get(User,user_id)
     if not u:raise HTTPException(404,'الموظف غير موجود')
     assert_not_removed(db,u)
@@ -1349,6 +1354,7 @@ def task_notice(db, recipient_id:int, actor_id:int, task:Task, kind:str):
 
 @app.post('/api/tasks',status_code=201)
 def create_task(data:TaskCreate,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.create')
     me=s.user
     if me.role=='employee':raise HTTPException(403,'لا يمكنك إنشاء التكليفات')
     if me.role=='head' and me.department_id!=data.department_id:raise HTTPException(403,'القسم غير مسموح')
@@ -1387,6 +1393,7 @@ def create_task(data:TaskCreate,db:Session=Depends(get_db),s=Depends(require_log
 
 @app.delete('/api/tasks/{task_id}')
 def cancel_task(task_id:int,data:TaskDeleteBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.cancel')
     task=get_task(db,task_id,s.user)
     if not is_executive(s.user) and task.created_by!=s.user_id:
         raise HTTPException(403,'حذف التكليف متاح لمصدره أو المدير العام فقط')
@@ -1534,6 +1541,7 @@ def list_attachments(task_id:int, db:Session=Depends(get_db), s=Depends(require_
 @app.post('/api/tasks/{task_id}/attachments', status_code=201)
 async def upload_attachment(task_id:int, file: UploadFile=File(...), category:str=Form('result'),
                             db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.upload')
     task=get_task(db,task_id,s.user)
     if s.user.id not in (task.assigned_to, task.created_by) and not can_approve(s.user,task):
         raise HTTPException(403, 'لا تملك صلاحية الإرفاق لهذه المهمة')
@@ -1587,6 +1595,7 @@ def download_attachment(task_id:int, attachment_id:int,db:Session=Depends(get_db
 
 @app.post('/api/tasks/{task_id}/assign')
 def assign_task(task_id:int,data:AssignBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.assign')
     me=s.user;t=get_task(db,task_id,me)
     if not can_approve(me,t):raise HTTPException(403,'ليس لديك صلاحية إعادة التكليف')
     if t.status=='done':raise HTTPException(409,'لا يمكن إعادة إسناد مهمة مكتملة')
@@ -1621,6 +1630,7 @@ def submit_task(task_id:int,data:SubmitBody,db:Session=Depends(get_db),s=Depends
 
 @app.post('/api/tasks/{task_id}/decision')
 def task_decision(task_id:int,data:Decision,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.approve')
     me=s.user;t=get_task(db,task_id,me)
     if not can_approve(me,t):raise HTTPException(403,'ليس لديك صلاحية الاعتماد')
     if t.status != 'review':raise HTTPException(409,'المهمة ليست قيد المراجعة')
@@ -1772,6 +1782,7 @@ def get_messages(channel:str='general',after:int=0,db:Session=Depends(get_db),s=
 
 @app.post('/api/messages',status_code=201)
 def post_message(data:MessageCreate,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'chat.send')
     if not allowed_channel(s.user,data.channel,db,write=True):raise HTTPException(403,'المحادثة غير متاحة')
     m=Message(channel=data.channel,sender_id=s.user_id,text=data.text.strip());db.add(m);db.flush();audit(db,s.user_id,'message',data.channel);db.commit()
     return {'id':m.id,'ok':True}
@@ -1779,6 +1790,7 @@ def post_message(data:MessageCreate,db:Session=Depends(get_db),s=Depends(require
 @app.post('/api/messages/upload',status_code=201)
 async def post_message_with_files(channel:str=Form(...),text:str=Form(''),files:list[UploadFile]=File(...),
                                   db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'chat.upload')
     if not allowed_channel(s.user,channel,db,write=True):raise HTTPException(403,'المحادثة غير متاحة')
     message=text.strip()
     if len(message)>4000:raise HTTPException(400,'نص المحادثة طويل جدًا')
@@ -1801,6 +1813,7 @@ async def post_message_with_files(channel:str=Form(...),text:str=Form(''),files:
 
 @app.delete('/api/messages/{message_id}')
 def moderate_chat(message_id:int,data:ModerateChatBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'chat.moderate')
     msg=db.get(Message,message_id)
     if not msg:raise HTTPException(404,'الرسالة غير موجودة')
     if not can_moderate_chat(s.user,msg.channel,db):raise HTTPException(403,'لا تملك صلاحية الإشراف على هذه المحادثة')
@@ -1850,10 +1863,12 @@ def activity_rows(me,db,user_id:Optional[int],start:Optional[date],end:Optional[
 
 @app.get('/api/activity')
 def activity(user_id:Optional[int]=None,start:Optional[date]=None,end:Optional[date]=None,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'activity.view')
     return activity_rows(s.user,db,user_id,start,end)[:1000]
 
 @app.get('/api/activity/export')
 def export_activity(user_id:Optional[int]=None,start:Optional[date]=None,end:Optional[date]=None,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'activity.view')
     rows=activity_rows(s.user,db,user_id,start,end)
     cols=[('id','معرف الجلسة'),('name','اسم الموظف'),('department','القسم'),('login_at','تاريخ ووقت الدخول UTC'),('logout_at','تاريخ ووقت الخروج UTC'),('last_seen','آخر اتصال UTC'),('duration_minutes','مدة الاتصال (دقيقة)'),('active_minutes','مدة النشاط المرصود (دقيقة)'),('status','الحالة'),('ended_reason','سبب الإنهاء')]
     stream=io.StringIO();writer=csv.writer(stream);writer.writerow([v for k,v in cols])
@@ -1963,6 +1978,7 @@ def dashboard(db:Session=Depends(get_db),s=Depends(require_login)):
 
 @app.get('/api/audit')
 def audit_logs(db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'audit.view')
     if not is_executive(s.user):raise HTTPException(403,'الصلاحية غير متاحة')
     return [{'action':a.action,'actor_id':a.actor_id,'details':a.details,'created_at':iso(a.created_at)} for a in db.scalars(select(Audit).order_by(Audit.id.desc()).limit(250))]
 
@@ -2026,6 +2042,7 @@ def list_internal_mail(folder:str='inbox',db:Session=Depends(get_db),s=Depends(r
 
 @app.post('/api/inbox',status_code=201)
 def compose_internal_mail(data:InternalMailCompose,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'mail.send')
     receiver=db.get(User,data.recipient_id)
     if not receiver or not receiver.active or receiver.id==s.user_id:
         raise HTTPException(400,'اختر موظفًا نشطًا غير حسابك')
@@ -2070,6 +2087,7 @@ def mark_internal_mail_read(thread_id:int,db:Session=Depends(get_db),s=Depends(r
 
 @app.post('/api/inbox/{thread_id}/reply',status_code=201)
 def reply_internal_mail(thread_id:int,data:InternalMailReply,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'mail.send')
     th=internal_mail_thread(db,thread_id,s.user)
     other_id=th.recipient_id if s.user_id==th.initiator_id else th.initiator_id
     other=db.get(User,other_id)
@@ -2087,6 +2105,8 @@ def reply_internal_mail(thread_id:int,data:InternalMailReply,db:Session=Depends(
 @app.post('/api/inbox/upload',status_code=201)
 async def compose_internal_mail_files(recipient_id:int=Form(...),subject:str=Form(...),body:str=Form(''),
                                       files:list[UploadFile]=File(...),db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'mail.upload')
+    require_permission(db,s.user,'mail.send')
     receiver=db.get(User,recipient_id)
     if not receiver or not receiver.active or receiver.id==s.user_id:
         raise HTTPException(400,'اختر موظفًا نشطًا غير حسابك')
@@ -2105,6 +2125,8 @@ async def compose_internal_mail_files(recipient_id:int=Form(...),subject:str=For
 @app.post('/api/inbox/{thread_id}/reply/upload',status_code=201)
 async def reply_internal_mail_files(thread_id:int,body:str=Form(''),files:list[UploadFile]=File(...),
                                     db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'mail.upload')
+    require_permission(db,s.user,'mail.send')
     th=internal_mail_thread(db,thread_id,s.user)
     other_id=th.recipient_id if s.user_id==th.initiator_id else th.initiator_id
     other=db.get(User,other_id)
@@ -2335,6 +2357,7 @@ def meetings_seen(db:Session=Depends(get_db),s=Depends(require_login)):
 
 @app.post('/api/meetings',status_code=201)
 def create_meeting(data:MeetingCreateBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'meetings.create')
     me=s.user
     title=data.title.strip()
     if len(title)<3:raise HTTPException(422,'عنوان الاجتماع قصير')
@@ -2372,6 +2395,7 @@ def read_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_log
 
 @app.post('/api/meetings/{meeting_id}/join')
 def join_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'meetings.join')
     m=meeting_access(db,meeting_id,s.user)
     # Serialize token issuance with the organizer's close request on PostgreSQL.
     m=db.execute(select(VideoMeeting).where(VideoMeeting.id==meeting_id)
@@ -2391,6 +2415,7 @@ def join_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_log
 
 @app.post('/api/meetings/{meeting_id}/end')
 def end_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'meetings.end')
     m=meeting_access(db,meeting_id,s.user)
     if m.organizer_id!=s.user_id:raise HTTPException(403,'يمكن لمنظّم الاجتماع فقط إنهاؤه')
     # Commit the gate FIRST: prevents the server issuing any new join JWTs.
@@ -2426,6 +2451,7 @@ class MeetingMinutesBody(BaseModel):
 @app.patch('/api/meetings/{meeting_id}/minutes')
 def update_meeting_minutes(meeting_id:int,data:MeetingMinutesBody,
                            db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'meetings.minutes')
     meeting=meeting_access(db,meeting_id,s.user)
     if meeting.organizer_id!=s.user_id:raise HTTPException(403,'محضر الاجتماع متاح للتعديل من المنظم فقط')
     meeting.minutes_text=data.text.strip()
@@ -2542,6 +2568,7 @@ def start_direct_call(data: DirectCallCreateBody,
         raise HTTPException(503, 'خدمة الاتصال المباشر غير متاحة الآن')
     if data.mode not in ('video','audio'):
         raise HTTPException(422, 'نوع الاتصال غير صالح')
+    require_permission(db,s.user,'calls.start.'+data.mode)
     ids = direct_call_invitees(db, s.user, data.invitee_ids, {s.user_id})
     recent = db.scalar(select(func.count(DirectCall.id)).where(
         DirectCall.initiator_id == s.user_id,
@@ -2573,6 +2600,7 @@ def start_direct_call(data: DirectCallCreateBody,
 @app.post('/api/calls/{call_id}/accept')
 def accept_direct_call(call_id: int, db: Session=Depends(get_db),
                        s=Depends(require_login)):
+    require_permission(db,s.user,'calls.accept')
     call, member = direct_call_access(db,call_id,s.user_id)
     call = db.execute(select(DirectCall).where(DirectCall.id==call_id)
                       .with_for_update().execution_options(populate_existing=True)).scalar_one()
@@ -2623,6 +2651,7 @@ def decline_direct_call(call_id: int,db:Session=Depends(get_db),
 @app.post('/api/calls/{call_id}/invite')
 def invite_direct_call(call_id:int,data:DirectCallInviteBody,
                        db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'calls.invite')
     call,member=direct_call_access(db,call_id,s.user_id)
     if call.initiator_id!=s.user_id:
         raise HTTPException(403,'دعوة مشاركين جدد متاحة لمنشئ الاتصال فقط')
@@ -2643,6 +2672,7 @@ def invite_direct_call(call_id:int,data:DirectCallInviteBody,
 @app.post('/api/calls/{call_id}/join')
 def join_direct_call(call_id: int,db:Session=Depends(get_db),
                      s=Depends(require_login)):
+    require_permission(db,s.user,'calls.join')
     call,member=direct_call_access(db,call_id,s.user_id)
     call=db.execute(select(DirectCall).where(DirectCall.id==call_id)
                     .with_for_update().execution_options(populate_existing=True)).scalar_one()
@@ -2659,6 +2689,7 @@ def join_direct_call(call_id: int,db:Session=Depends(get_db),
 @app.post('/api/calls/{call_id}/end')
 def end_direct_call(call_id: int,db:Session=Depends(get_db),
                     s=Depends(require_login)):
+    require_permission(db,s.user,'calls.end')
     call,member=direct_call_access(db,call_id,s.user_id)
     if call.initiator_id!=s.user_id:
         raise HTTPException(403,'إنهاء الاتصال للجميع متاح لمنشئ الاتصال فقط')
