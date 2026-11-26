@@ -56,6 +56,7 @@ SESSION_SECONDS = 12 * 60 * 60
 ONLINE_WINDOW_SECONDS = 75
 EXECUTIVE_ROLES = ('director', 'advisor')
 GENERAL_MANAGEMENT_NAME = 'الإدارة العامة'
+DEFAULT_ROLE_LABELS = {'director':'مدير عام الإدارة', 'advisor':'مستشار القطاع', 'head':'رئيس قسم', 'employee':'موظف'}
 # Meeting video is disabled until approved LiveKit credentials are explicitly configured.
 LIVEKIT_URL = os.getenv('LIVEKIT_URL', '').strip().rstrip('/')
 LIVEKIT_API_KEY = os.getenv('LIVEKIT_API_KEY', '').strip()
@@ -86,6 +87,11 @@ class Department(Base):
     __tablename__ = 'departments'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(160), unique=True)
+
+class OrganizationSetting(Base):
+    __tablename__ = 'organization_settings'
+    key: Mapped[str] = mapped_column(String(70), primary_key=True)
+    value: Mapped[str] = mapped_column(String(200), nullable=False)
 
 class User(Base):
     __tablename__ = 'users'
@@ -297,6 +303,44 @@ class LoginAttempt(Base):
 
 Base.metadata.create_all(engine)  # for pilot; production schema changes use versioned migrations
 
+def general_department(db: Session):
+    """Resolve the permanent organizational ID even if its display name is edited."""
+    setting = db.get(OrganizationSetting, 'general_department_id')
+    if setting and setting.value.isdecimal():
+        dept = db.get(Department, int(setting.value))
+        if dept:
+            return dept
+    return db.scalar(select(Department).where(Department.name == GENERAL_MANAGEMENT_NAME))
+
+def general_department_id(db: Session):
+    dept = general_department(db)
+    return dept.id if dept else None
+
+def organization_snapshot(db: Session):
+    roles = {}
+    for role, default in DEFAULT_ROLE_LABELS.items():
+        stored = db.get(OrganizationSetting, 'role_label_' + role)
+        roles[role] = stored.value if stored and stored.value.strip() else default
+    revision = db.get(OrganizationSetting, 'revision')
+    general = general_department(db)
+    return {'revision': revision.value if revision else '0',
+            'general_department_id': general.id if general else None,
+            'general_department_name': general.name if general else GENERAL_MANAGEMENT_NAME,
+            'roles': roles}
+
+def touch_organization_revision(db: Session):
+    item = db.get(OrganizationSetting, 'revision')
+    if item is None:
+        db.add(OrganizationSetting(key='revision', value=secrets.token_hex(12)))
+    else:
+        item.value = secrets.token_hex(12)
+
+def normalized_organization_label(label: str, max_length: int):
+    name = ' '.join(label.split())
+    if not 2 <= len(name) <= max_length or any(ord(c) < 32 for c in name):
+        raise HTTPException(422, 'المسمى يجب أن يتضمن من 2 إلى ' + str(max_length) + ' حرفًا')
+    return name
+
 def bootstrap():
     with SessionLocal() as db:
         if not db.scalar(select(Department.id).limit(1)):
@@ -310,17 +354,20 @@ def bootstrap():
                 print('ENJAZ: administrator account provisioned; remove bootstrap environment secrets', flush=True)
             else:
                 print('ENJAZ: no users; configure BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD (14+ chars)', flush=True)
-        # Preserve existing department IDs: add the general management unit only if
-        # it does not exist. It is for staff affiliation, not for the independent adviser.
-        if not db.scalar(select(Department.id).where(Department.name == GENERAL_MANAGEMENT_NAME)):
+        # Store the stable ID once; renaming the general unit must never duplicate it.
+        general = general_department(db)
+        if general is None:
             db.add(Department(name=GENERAL_MANAGEMENT_NAME))
             try:
                 db.commit()
-                print('ENJAZ: general management unit registered', flush=True)
             except IntegrityError:
-                db.rollback()  # Another instance may have registered it concurrently.
-                if not db.scalar(select(Department.id).where(Department.name == GENERAL_MANAGEMENT_NAME)):
-                    raise
+                db.rollback()
+            general = general_department(db)
+            if general is None:
+                raise RuntimeError('Unable to initialize general management unit')
+        if db.get(OrganizationSetting, 'general_department_id') is None:
+            db.add(OrganizationSetting(key='general_department_id', value=str(general.id)))
+            db.commit()
         # Data repair for accounts created by older versions: sector advisers are
         # independent of departments. Keep their prior task and message history.
         legacy_advisers = db.scalars(select(User).where(
@@ -477,6 +524,15 @@ class UserEdit(BaseModel):
 class UserDeleteBody(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
+class DepartmentRenameBody(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+
+class RoleLabelsBody(BaseModel):
+    director: str = Field(min_length=2, max_length=80)
+    advisor: str = Field(min_length=2, max_length=80)
+    head: str = Field(min_length=2, max_length=80)
+    employee: str = Field(min_length=2, max_length=80)
+
 class StepIn(BaseModel):
     title: str = Field(min_length=2,max_length=220)
     weight: int = Field(ge=1,le=100)
@@ -600,6 +656,57 @@ def update_own_email(data:ChangeEmailBody,db:Session=Depends(get_db),s=Depends(r
 def departments(db: Session=Depends(get_db),s=Depends(require_login)):
     return [{'id':d.id,'name':d.name} for d in db.scalars(select(Department).order_by(Department.id))]
 
+@app.get('/api/organization')
+def get_organization(db: Session=Depends(get_db),s=Depends(require_login)):
+    """Role labels change only display titles, never user permissions."""
+    return organization_snapshot(db)
+
+@app.patch('/api/departments/{department_id}')
+def rename_department(department_id: int, data: DepartmentRenameBody,
+                      db: Session=Depends(get_db), s=Depends(require_login)):
+    if s.user.role != 'director':
+        raise HTTPException(403, 'تعديل أسماء الأقسام متاح للمدير العام فقط')
+    dept = db.scalar(select(Department).where(Department.id == department_id).with_for_update())
+    if dept is None:
+        raise HTTPException(404, 'القسم غير موجود')
+    name = normalized_organization_label(data.name, 160)
+    if name != dept.name:
+        old_name = dept.name
+        dept.name = name
+        touch_organization_revision(db)
+        audit(db, s.user_id, 'department_renamed',
+              f'department_id={dept.id};from={old_name};to={name}')
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, 'هذا المسمى مستخدم في قسم آخر')
+    return {'ok': True, 'department': {'id': dept.id, 'name': dept.name},
+            'organization': organization_snapshot(db)}
+
+@app.patch('/api/organization/role-labels')
+def rename_role_labels(data: RoleLabelsBody, db: Session=Depends(get_db),
+                       s=Depends(require_login)):
+    if s.user.role != 'director':
+        raise HTTPException(403, 'تعديل مسميات المستويات الإدارية متاح للمدير العام فقط')
+    labels = {role: normalized_organization_label(getattr(data, role), 80)
+              for role in DEFAULT_ROLE_LABELS}
+    if len(set(labels.values())) != len(labels):
+        raise HTTPException(422, 'يجب أن يكون لكل مستوى إداري مسمى مختلف')
+    current = organization_snapshot(db)['roles']
+    if labels != current:
+        for role, name in labels.items():
+            item = db.get(OrganizationSetting, 'role_label_' + role)
+            if item is None:
+                db.add(OrganizationSetting(key='role_label_' + role, value=name))
+            else:
+                item.value = name
+        touch_organization_revision(db)
+        audit(db, s.user_id, 'organization_roles_renamed',
+              ';'.join(f'{k}:{current[k]}->{labels[k]}' for k in DEFAULT_ROLE_LABELS))
+        db.commit()
+    return {'ok': True, 'organization': organization_snapshot(db)}
+
 @app.get('/api/users')
 def users(db: Session=Depends(get_db),s=Depends(require_login)):
     me=s.user
@@ -615,7 +722,7 @@ def require_free_department_head(db: Session, department_id: int):
     dept = db.scalar(select(Department).where(Department.id == department_id).with_for_update())
     if not dept:
         raise HTTPException(400, 'القسم المحدد غير موجود')
-    if dept.name == GENERAL_MANAGEMENT_NAME:
+    if dept.id == general_department_id(db):
         raise HTTPException(400, 'الإدارة العامة ارتباط تنظيمي مستقل، وليست قسمًا يُعين له رئيس قسم')
     current = db.scalar(select(User).where(User.department_id == department_id,
                                            User.role == 'head', ~User.id.in_(select(UserRemoval.user_id))).order_by(User.id).limit(1))
@@ -656,7 +763,7 @@ def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get
         if data.role != 'employee':
             raise HTTPException(409, 'يجب تحويل مستشار القطاع إلى موظف أولًا')
         if data.department_id is None:
-            general = db.scalar(select(Department).where(Department.name == GENERAL_MANAGEMENT_NAME))
+            general = general_department(db)
             if general is None:
                 raise HTTPException(409, 'وحدة الإدارة العامة غير مسجلة؛ أعد تشغيل التطبيق')
             new_department_id = general.id
@@ -856,6 +963,13 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
         departments = db.scalars(select(Department)).all()
         departments_by_id = {d.id:d for d in departments}
         departments_by_name = {d.name.strip():d for d in departments}
+        # Imports must never accept the director role, even after a title rename.
+        # Legacy aliases take precedence to avoid changing an existing sheet's meaning.
+        customized_aliases = {name.casefold(): role
+                              for role, name in organization_snapshot(db)['roles'].items()
+                              if role in ('employee', 'head', 'advisor')
+                              and name.casefold() not in IMPORT_ROLE_ALIASES}
+        role_aliases = {**customized_aliases, **IMPORT_ROLE_ALIASES}
         default_dept = departments_by_id.get(default_department_id) if default_department_id else None
         if default_department_id is not None and default_dept is None:
             raise HTTPException(400, 'القسم الافتراضي المحدد غير موجود')
@@ -891,7 +1005,7 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
                 seen.add(email)
             if not isinstance(raw('password').value if raw('password') else None, str) or not 12 <= len(password) <= 128:
                 row_errors.append('كلمة المرور يجب أن تكون نصًا من 12 إلى 128 حرفًا')
-            role = IMPORT_ROLE_ALIASES.get(role_text.lower())
+            role = role_aliases.get(role_text.casefold())
             if not role:
                 row_errors.append('الدور يجب أن يكون موظفًا أو رئيس قسم أو مستشار القطاع')
             # Even if the Excel file contains a department for an adviser,
@@ -899,7 +1013,7 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
             dept = None if role == 'advisor' else (departments_by_name.get(department_text) if department_text else default_dept)
             if role != 'advisor' and not dept:
                 row_errors.append('القسم غير موجود أو لم يتم اختيار قسم افتراضي')
-            if role == 'head' and dept and dept.name == GENERAL_MANAGEMENT_NAME:
+            if role == 'head' and dept and dept.id == general_department_id(db):
                 row_errors.append('الإدارة العامة ليست قسمًا ولا يمكن تعيين رئيس قسم لها')
             if row_errors:
                 errors.append({'row':rownum, 'message':'؛ '.join(row_errors)})
@@ -1589,9 +1703,10 @@ def presence(db: Session = Depends(get_db), s = Depends(require_login)):
     # 'الإدارة العامة' unit without making the director an employee of it, and
     # without showing two duplicate cards for that name.
     if any(u.department_id is None and u.role != 'advisor' for u in visible_users):
-        office = next((g for g in groups if g['department'] == GENERAL_MANAGEMENT_NAME), None)
+        general_unit = general_department(db)
+        office = next((g for g in groups if g['department_id'] == (general_unit.id if general_unit else None)), None)
         if office is None:
-            office = {'department_id': None, 'department': GENERAL_MANAGEMENT_NAME, 'total_staff': 0,
+            office = {'department_id': None, 'department': general_unit.name if general_unit else GENERAL_MANAGEMENT_NAME, 'total_staff': 0,
                       'online_count': 0, 'employees': []}
             groups.append(office)
         groups_by_id[None] = office
