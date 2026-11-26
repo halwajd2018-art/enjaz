@@ -27,6 +27,10 @@ COPY __init__.py /app/app/__init__.py
 COPY index.html app.js style.css /app/app/static/
 COPY --from=livekit-sdk /opt/livekit/package/dist/livekit-client.umd.js /app/app/static/livekit-client.umd.min.js
 RUN python -m py_compile /app/app/main.py
+# All tests use a temporary SQLite DB and stub LiveKit; no production DB or keys.
+COPY tests /app/tests
+RUN python -m unittest discover -s tests -p 'test_direct_calls.py' -v \
+    && rm -rf /app/tests
 
 USER enjaz
 
