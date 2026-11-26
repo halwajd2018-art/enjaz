@@ -593,3 +593,198 @@ function editMeetingMinutes(meetingId){
  modal('محضر الاجتماع',`<form id="meetingMinutesForm" class="form-stack"><p class="hint">سجّل القرارات والتوصيات ومحاور المتابعة. لا يتم تسجيل الصوت أو الفيديو.</p><label class="form-field">المحضر<textarea name="minutes" class="input" maxlength="8000" rows="10">${safe(m.minutes_text||'')}</textarea></label><button class="btn">حفظ المحضر</button></form>`);
  $('meetingMinutesForm').onsubmit=request(async e=>{e.preventDefault();await api('/meetings/'+meetingId+'/minutes',{method:'PATCH',data:{text:new FormData(e.currentTarget).get('minutes')}});closeModal();await renderMeetings();toast('تم حفظ محضر الاجتماع')});
 }
+
+
+// Direct-call signaling is server-authorized. No public room links or persistent JWT storage.
+// Incoming calls are polled while Enjaz is open; the browser may restrict audible alerts.
+const directStatusLabels={ringing:'جارٍ الاتصال',active:'اتصال جارٍ',ending:'جارٍ الإغلاق',
+  ended:'منتهٍ',missed:'لم يُرد',declined:'مرفوض',expired:'انتهى الوقت'};
+let directPollCount=0;
+async function pollDirectCalls(){
+ if(!state.me||state.directCallBusy)return;
+ state.directCallBusy=true;
+ try{
+  const response=await api('/calls');
+  state.directCalls=response.calls||[];
+  showDirectIncoming((response.incoming||[])[0]);
+  const active=state.directCalls.find(c=>c.id===state.directCallId);
+  if(state.directRoom&&(!active||!['ringing','active'].includes(active.status))){
+   await disconnectDirectRoom();
+   if(state.page==='calls')await renderDirectCalls();
+   if(active)toast('انتهى الاتصال: '+(directStatusLabels[active.status]||active.status));
+  }else if(state.page==='calls'&&!state.directRoom){
+   updateDirectCallHistory();
+  }
+  document.querySelectorAll('[data-page="calls"]').forEach(btn=>{
+   btn.querySelector('[data-call-badge]')?.remove();
+   if(response.incoming?.length){const tag=document.createElement('b');tag.className='mail-badge';tag.dataset.callBadge='';tag.textContent=response.incoming.length;btn.appendChild(tag)}
+  });
+ }finally{state.directCallBusy=false}
+}
+function showDirectIncoming(call){
+ let box=document.getElementById('directIncoming');
+ if(!call||state.directRoom||!state.me){box?.remove();return}
+ if(!box){box=document.createElement('section');box.id='directIncoming';box.className='direct-incoming';box.setAttribute('role','alertdialog');box.setAttribute('aria-label','اتصال وارد');document.body.appendChild(box)}
+ const caller=call.participants.find(p=>p.id===call.initiator_id);
+ box.innerHTML='<div class="direct-incoming-title">📞 اتصال '+(call.mode==='audio'?'صوتي':'مرئي')+' وارد</div>'+
+  '<p><b>'+safe(caller?.name||'موظف')+'</b> يدعوك إلى اتصال مباشر'+(call.participants.length>2?' مع '+(call.participants.length-2)+' مشاركين آخرين':'')+'</p>'+
+  '<div class="action-row"><button class="btn" id="acceptDirectIncoming">قبول الاتصال</button>'+
+  '<button class="btn danger" id="declineDirectIncoming">رفض</button></div>';
+ $('acceptDirectIncoming').onclick=request(async()=>{if(state.videoRoom)throw Error('أنه مشاركتك في الاجتماع المجدول أولًا');await acceptDirectCall(call.id)});
+ $('declineDirectIncoming').onclick=request(async()=>{await api('/calls/'+call.id+'/decline',{method:'POST'});box.remove();await pollDirectCalls()});
+ if(state.lastIncomingCallId!==call.id){
+  state.lastIncomingCallId=call.id;
+  if(navigator.vibrate)navigator.vibrate([180,90,180]);
+  try{if(window.Notification&&Notification.permission==='granted')new Notification('اتصال وارد عبر إنجاز',{body:caller?.name||'مستخدم إنجاز'})}catch{}
+ }
+}
+function directCallContactsMarkup(contacts,exclude=[]){
+ const excludeIds=new Set(exclude);
+ return contacts.filter(u=>!excludeIds.has(u.id)).map(u=>
+  '<label class="direct-contact"><input type="checkbox" name="call_invitee" value="'+u.id+'">'+
+  '<span><strong>'+safe(u.name)+'</strong><small>'+safe(affiliationLabel(u))+' · '+
+  (u.online?'🟢 متصل':'غير متصل')+'</small></span></label>').join('')||
+  '<p class="hint">لا يوجد موظفون آخرون يمكن دعوتهم.</p>';
+}
+async function renderDirectCalls(){
+ if(state.directRoom)return;
+ state.page='calls';
+ const [response,contacts]=await Promise.all([api('/calls'),api('/calls/contacts')]);
+ state.directCalls=response.calls||[];state.directContacts=contacts;
+ renderShell('الاتصالات الصوتية والمرئية',
+  '<div class="page-head"><div><h2>اتصال مباشر بدون موعد</h2><p>اتصل بموظف أو مجموعة فورًا؛ ستظهر لهم دعوة لقبول المكالمة أو رفضها.</p></div></div>'+
+  '<section class="panel"><h3>بدء اتصال جديد</h3><form id="directStartForm" class="form-stack">'+
+  '<div class="direct-call-type"><label><input type="radio" name="mode" value="video" checked> 📹 مرئي</label>'+
+  '<label><input type="radio" name="mode" value="audio"> 🎙️ صوتي</label></div>'+
+  '<p class="hint">اختر من موظف واحد إلى 15 موظفًا؛ لا حاجة لإنشاء اجتماع مجدول.</p>'+
+  '<div class="direct-contacts">'+directCallContactsMarkup(contacts,[state.me.id])+'</div>'+
+  '<div class="action-row"><button class="btn" type="submit" '+(!response.video_enabled?'disabled':'')+'>بدء الاتصال الآن</button></div></form>'+
+  (!response.video_enabled?'<p class="error">خدمة الصوت والصورة غير متاحة من إعدادات النظام.</p>':'')+'</section>'+
+  '<section class="panel" style="margin-top:16px"><h3>الاتصالات الحالية والسجل الأخير</h3><div id="directCallHistory"></div></section>'+
+  '<p class="footer-note">يظهر تنبيه المكالمة الواردة أثناء فتح إنجاز في المتصفح، وليس كإشعار هاتف خارج التطبيق. لا يُسجَّل صوت أو فيديو المكالمات.</p>');
+ updateDirectCallHistory();
+ $('directStartForm').onsubmit=request(async e=>{
+  e.preventDefault();const form=e.currentTarget;
+  const ids=Array.from(form.querySelectorAll('input[name="call_invitee"]:checked')).map(i=>Number(i.value));
+  if(!ids.length)throw Error('اختر موظفًا واحدًا على الأقل');
+  const mode=form.querySelector('input[name="mode"]:checked').value;
+  const button=form.querySelector('button[type="submit"]');button.disabled=true;
+  try{const call=await api('/calls',{method:'POST',data:{invitee_ids:ids,mode}});
+    state.directCalls.unshift(call);await connectDirectCall(call)}
+  finally{button.disabled=false}
+ });
+}
+function updateDirectCallHistory(){
+ const list=$('directCallHistory');if(!list||state.page!=='calls'||state.directRoom)return;
+ const calls=state.directCalls.slice(0,35);
+ list.innerHTML=calls.length?calls.map(c=>{
+  const names=c.participants.filter(p=>p.id!==state.me.id).map(p=>safe(p.name)).join('، ');
+  const actions=[];
+  if(c.incoming)actions.push('<button class="btn small" data-direct-accept="'+c.id+'">قبول</button><button class="btn danger small" data-direct-decline="'+c.id+'">رفض</button>');
+  if(['ringing','active'].includes(c.status)&&c.my_status==='accepted')actions.push('<button class="btn secondary small" data-direct-join="'+c.id+'">دخول الاتصال</button>');
+  if(c.is_initiator&&['ringing','active','ending'].includes(c.status))actions.push('<button class="btn danger small" data-direct-end="'+c.id+'">'+(c.status==='ending'?'إعادة الإغلاق':'إنهاء للجميع')+'</button>');
+  return '<div class="direct-history-row"><div><b>'+(c.mode==='audio'?'🎙️ اتصال صوتي':'📹 اتصال مرئي')+' · '+safe(directStatusLabels[c.status]||c.status)+'</b>'+
+   '<small>'+safe(fmt(c.created_at))+' · '+(names||'—')+' · '+c.participants.length+' مشاركين</small></div>'+
+   '<div class="employee-actions">'+actions.join('')+'</div></div>';
+ }).join(''):'<p class="hint">لا توجد اتصالات سابقة.</p>';
+ list.querySelectorAll('[data-direct-accept]').forEach(b=>b.onclick=request(()=>acceptDirectCall(Number(b.dataset.directAccept))));
+ list.querySelectorAll('[data-direct-decline]').forEach(b=>b.onclick=request(async()=>{await api('/calls/'+b.dataset.directDecline+'/decline',{method:'POST'});await pollDirectCalls()}));
+ list.querySelectorAll('[data-direct-join]').forEach(b=>b.onclick=request(async()=>{const c=state.directCalls.find(x=>x.id===Number(b.dataset.directJoin));if(c)await connectDirectCall(c)}));
+ list.querySelectorAll('[data-direct-end]').forEach(b=>b.onclick=request(async()=>{await api('/calls/'+b.dataset.directEnd+'/end',{method:'POST'});await pollDirectCalls()}));
+}
+async function openDirectCallFromEmployee(userId){
+ if(!state.me||state.videoRoom||state.directRoom)throw Error('أنه الاتصال الحالي أولًا');
+ const contacts=await api('/calls/contacts');
+ const user=contacts.find(u=>u.id===userId);
+ if(!user)throw Error('هذا الموظف غير متاح للاتصال');
+ modal('بدء اتصال مع '+user.name,
+  '<div class="note">سيظهر للموظف إشعار داخل منصة إنجاز للقبول أو الرفض.</div>'+
+  '<div class="action-row"><button id="quickVideoCall" class="btn">📹 اتصال مرئي</button>'+
+  '<button id="quickAudioCall" class="btn secondary">🎙️ اتصال صوتي</button></div>');
+ const start=(mode)=>request(async()=>{
+  const call=await api('/calls',{method:'POST',data:{invitee_ids:[userId],mode}});
+  closeModal();state.directCalls.unshift(call);await connectDirectCall(call);
+ });
+ $('quickVideoCall').onclick=start('video');$('quickAudioCall').onclick=start('audio');
+}
+async function acceptDirectCall(id){
+ if(state.directRoom||state.videoRoom)throw Error('أنه اتصالك الحالي أولًا');
+ const call=await api('/calls/'+id+'/accept',{method:'POST'});
+ document.getElementById('directIncoming')?.remove();
+ state.directCalls=state.directCalls.filter(c=>c.id!==id);
+ state.directCalls.unshift(call);
+ await connectDirectCall(call);
+}
+async function connectDirectCall(call){
+ if(state.directRoom||state.videoRoom)throw Error('لديك اتصال أو اجتماع مرئي قائم');
+ const access=await api('/calls/'+call.id+'/join',{method:'POST'});
+ const LK=await loadLiveKitSdk(access.sdk_url);
+ const room=new LK.Room({adaptiveStream:true,dynacast:true});
+ state.directRoom=room;state.directCallId=call.id;state.page='calls';
+ document.getElementById('directIncoming')?.remove();
+ renderShell('اتصال مباشر — '+(call.mode==='audio'?'صوتي':'مرئي'),
+  '<section class="panel"><div class="meeting-room-head"><div><h3>📞 الاتصال المباشر</h3>'+
+  '<p>'+(call.mode==='audio'?'مكالمة صوتية':'مكالمة فيديو')+' · '+call.participants.length+' مدعوين</p></div>'+
+  '<span class="pill working" id="meetingConnection">جارٍ الاتصال…</span></div>'+
+  '<div id="meetingVideoWall" class="meeting-video-wall">'+
+  '<div class="meeting-tile" data-participant-id="local"><div class="meeting-tile-placeholder">♙</div><small>أنت ('+safe(state.me.name)+')</small></div></div>'+
+  '<div class="meeting-controls"><button class="btn secondary" id="meetingMic">🎤 تشغيل الميكروفون</button>'+
+  '<button class="btn secondary" id="meetingCam">📷 تشغيل الكاميرا</button>'+
+  '<button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button>'+
+  '<button class="btn outline" id="directInviteMore" '+(!call.is_initiator||call.participants.length>=16?'disabled':'')+'>＋ إضافة مشارك</button>'+
+  '<button class="btn danger" id="directLeaveCall">'+(call.is_initiator?'إنهاء الاتصال للجميع':'مغادرة الاتصال')+'</button></div>'+
+  '<p class="hint">لا تحتاج المكالمة إلى موعد أو رابط عام. يُسمح بالانضمام للمستخدمين الذين قبلوا دعوتهم فقط.</p></section>');
+ room.on(LK.RoomEvent.TrackSubscribed,(track,pub,p)=>attachVideoTrack(track,p.identity,p.name||'مشارك'));
+ room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
+ room.on(LK.RoomEvent.ParticipantDisconnected,p=>document.querySelectorAll('[data-participant-id]').forEach(x=>{if(x.dataset.participantId===p.identity)x.remove()}));
+ room.on(LK.RoomEvent.LocalTrackPublished,pub=>{if(pub.track?.kind==='video'&&pub.track.source===LK.Track.Source.Camera){
+  const el=pub.track.attach();el.muted=true;el.autoplay=true;el.playsInline=true;el.className='meeting-track';
+  const tile=document.querySelector('[data-participant-id="local"]');
+  if(tile){tile.querySelector('video')?.remove();tile.prepend(el);tile.querySelector('.meeting-tile-placeholder')?.remove()}
+ }});
+ room.on(LK.RoomEvent.Disconnected,()=>{if(state.directRoom===room){state.directRoom=null;state.directCallId=null;if(state.me&&state.page==='calls')renderDirectCalls().catch(()=>{})}});
+ $('meetingMic').onclick=request(async()=>{const on=!room.localParticipant.isMicrophoneEnabled;await room.localParticipant.setMicrophoneEnabled(on);$('meetingMic').textContent=on?'🔇 كتم الميكروفون':'🎤 تشغيل الميكروفون'});
+ $('meetingCam').onclick=request(async()=>{const on=!room.localParticipant.isCameraEnabled;await room.localParticipant.setCameraEnabled(on);$('meetingCam').textContent=on?'📷 إيقاف الكاميرا':'📷 تشغيل الكاميرا'});
+ $('meetingScreen').onclick=request(async()=>{const on=!room.localParticipant.isScreenShareEnabled;await room.localParticipant.setScreenShareEnabled(on);$('meetingScreen').textContent=on?'إيقاف مشاركة الشاشة':'▣ مشاركة الشاشة'});
+ $('directInviteMore').onclick=request(()=>inviteMoreDirectParticipants(call.id));
+ $('directLeaveCall').onclick=request(async()=>{
+  if(call.is_initiator){if(!window.confirm('إنهاء المكالمة وفصل جميع المشاركين؟'))return;await api('/calls/'+call.id+'/end',{method:'POST'})}
+  else await api('/calls/'+call.id+'/leave',{method:'POST'});
+  await disconnectDirectRoom();await renderDirectCalls();
+ });
+ try{
+  await room.connect(access.server_url,access.token);
+  $('meetingConnection').textContent='متصل';
+  room.remoteParticipants.forEach(p=>p.trackPublications.forEach(pub=>{if(pub.track)attachVideoTrack(pub.track,p.identity,p.name||'مشارك')}));
+  try{
+   await room.localParticipant.setMicrophoneEnabled(true);
+   if($('meetingMic'))$('meetingMic').textContent='🔇 كتم الميكروفون';
+   if(call.mode==='video'){await room.localParticipant.setCameraEnabled(true);if($('meetingCam'))$('meetingCam').textContent='📷 إيقاف الكاميرا'}
+  }catch{toast('تم الاتصال. اسمح للمتصفح باستخدام الكاميرا والميكروفون أو فعّلهما يدويًا')}
+ }catch(e){
+  await disconnectDirectRoom();
+  await renderDirectCalls();
+  throw Error('فشل الاتصال: '+(e.message||'تأكد من الشبكة وإعدادات LiveKit'));
+ }
+}
+async function disconnectDirectRoom(){
+ const room=state.directRoom;state.directRoom=null;state.directCallId=null;
+ if(room){try{await room.disconnect()}catch{}}
+}
+async function inviteMoreDirectParticipants(callId){
+ const c=state.directCalls.find(x=>x.id===callId);
+ const contacts=await api('/calls/contacts');
+ const excluded=(c?.participants||[]).map(p=>p.id);
+ const available=contacts.filter(x=>!excluded.includes(x.id));
+ if(!available.length)throw Error('لا يوجد موظفون آخرون متاحون للدعوة');
+ modal('إضافة مشاركين للمكالمة','<form id="moreDirectInvite" class="form-stack"><p class="hint">يمكن إضافة المشاركين أثناء المكالمة، وتصل لهم دعوة قبول جديدة.</p>'+
+  '<div class="direct-contacts">'+directCallContactsMarkup(available,excluded)+'</div>'+
+  '<div class="action-row"><button class="btn" type="submit">إرسال الدعوات</button><button class="btn outline" id="cancelMoreDirect" type="button">إلغاء</button></div></form>');
+ $('cancelMoreDirect').onclick=closeModal;
+ $('moreDirectInvite').onsubmit=request(async e=>{
+  e.preventDefault();const ids=Array.from(e.currentTarget.querySelectorAll('input[name="call_invitee"]:checked')).map(i=>Number(i.value));
+  if(!ids.length)throw Error('اختر مشاركًا واحدًا على الأقل');
+  await api('/calls/'+callId+'/invite',{method:'POST',data:{invitee_ids:ids}});
+  closeModal();await pollDirectCalls();toast('أُرسلت الدعوات الجديدة');
+ });
+}
