@@ -1,10 +1,11 @@
 'use strict';
 const root=document.getElementById('root');
-const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false};
+const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false,permissions:{},permissionCatalog:[],permissionSelectedUserId:null,permissionSelectedSnapshot:null};
 const $=id=>document.getElementById(id);
 const safe=s=>String(s===null||s===undefined?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=dt=>dt?new Date(dt).toLocaleString('ar-SA',{dateStyle:'short',timeStyle:'short',timeZone:'Asia/Riyadh'}):'—';
 const fdate=dt=>dt?new Date(dt+'T12:00:00').toLocaleDateString('ar-SA'):'—';
+const canDo=code=>state.permissions?.[code]?.allowed===true;
 const roles={director:'مدير عام الإدارة',advisor:'مستشار القطاع',head:'رئيس قسم',employee:'موظف'};
 const isExecutive=role=>role==='director'||role==='advisor';
 const affiliationLabel=u=>u.role==='advisor'?roles.advisor+' — ارتباط مستقل':(u.department||state.organization.general_department_name||'الإدارة العامة');
@@ -89,7 +90,7 @@ async function populateAttachments(taskId){
 }
 function request(fn){return async(...rgs)=>{try{await fn(...rgs)}catch(e){toast(e.message||'حدث خطأ')}}}
 async function init(){try{const data=await api('/me');state.me=data.user;state.csrf=data.csrf;await loadAll();startBackground();render()}catch(e){renderLogin()}}
-async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices,organization]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications'),api('/organization')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:false,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}
+async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices,organization,permissionsData]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications'),api('/organization'),api('/permissions/me')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,permissions:permissionsData.permissions,organizationRefreshPending:false,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}
 async function pollOrganization(){if(!state.me)return;const organization=await api('/organization');if(organization.revision!==state.organization.revision){const [users,departments,tasks,dashboard,presence]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:true});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}if(state.organizationRefreshPending&&!state.videoRoom&&!state.directRoom&&!document.querySelector('.modal-cover')&&!document.hidden){state.organizationRefreshPending=false;render();}}
 const noticeKinds={assigned:'تكليف جديد',review:'مهمة مكتملة تنتظر المراجعة',completed:'تم اعتماد المهمة واكتمالها',revision:'أُعيدت المهمة للتعديل',cancelled:'تم إلغاء التكليف'};
 function syncNoticeBadges(){
@@ -108,6 +109,14 @@ async function pollNotifications(quiet=false){
  if(!quiet&&state.noticeInitialized&&data.total_unread>old)toast('لديك إشعارات جديدة: رسالة أو محادثة أو تحديث مهمة');
  state.noticeInitialized=true;
  pollOrganization().catch(()=>{});
+ pollMyPermissions().catch(()=>{});
+}
+async function pollMyPermissions(){
+ if(!state.me)return;
+ const data=await api('/permissions/me');
+ const before=JSON.stringify(state.permissions);
+ state.permissions=data.permissions;
+ if(before!==JSON.stringify(data.permissions)&&state.page!=='permissions'&&!state.videoRoom&&!state.directRoom&&!document.querySelector('.modal-cover')&&!document.hidden)render();
 }
 function notificationCenterHtml(data){
  const ev=data.events||[];
@@ -131,14 +140,14 @@ function openNotificationCenter(){
 function renderLogin(){stopRoomChat();stopBackground();document.getElementById('directIncoming')?.remove();state.directCalls=[];root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p></div></div>`;
  $('loginForm').onsubmit=request(async e=>{e.preventDefault();let fd=new FormData(e.currentTarget);let btn=e.currentTarget.querySelector('button');btn.disabled=true;try{let response=await api('/auth/login',{method:'POST',data:{email:fd.get('email'),password:fd.get('password')}});state.me=response.user;state.csrf=response.csrf;state.page='dashboard';state.noticeInitialized=false;await loadAll();startBackground();render();if(state.me.must_change_password)changePasswordModal(true)}catch(error){$('loginError').textContent=error.message}finally{btn.disabled=false}});
 }
-function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['calls','📞','الاتصالات المباشرة'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director'))}
+function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['calls','📞','الاتصالات المباشرة'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['permissions','🔐','إدارة الصلاحيات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director')&&(x[0]!=='permissions'||state.me.role==='director'))}
 function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}${id==='meetings'&&state.meetingUnread?`<b class="mail-badge" data-meeting-badge>${state.meetingUnread}</b>`:''}${id==='calls'&&state.directCalls.some(c=>c.incoming)?`<b class="mail-badge" data-call-badge>●</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
  document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال أولًا');return}if(state.videoRoom)leaveVideoMeeting();stopRoomChat();state.page=btn.dataset.page;state.selectedTask=null;render()});
  $('logoutBtn').onclick=request(async()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال قبل تسجيل الخروج');return}await leaveVideoMeeting();await api('/auth/logout',{method:'POST'});state.me=null;state.csrf=null;renderLogin()});
  $('changePwBtn').onclick=()=>changePasswordModal(false);$('changeEmailBtn').onclick=()=>changeEmailModal();$('notificationBell').onclick=()=>openNotificationCenter();
 }
 function render(){if(!state.me)return renderLogin();if(state.page!=='chat'&&state.chatTimer){clearInterval(state.chatTimer);state.chatTimer=null}
- switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'calls':return renderDirectCalls();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'audit':return renderAudit();default:return renderDashboard()}}
+ switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'calls':return renderDirectCalls();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'permissions':return renderPermissions();case'audit':return renderAudit();default:return renderDashboard()}}
 function cards(){const d=state.dashboard;return `<div class="cards">${[['إجمالي التكليفات',d.total||0,'مهمة مسجلة'],['المهام المكتملة',d.done||0,'معتمدة نهائيًا'],['المهام المتأخرة',d.late||0,'تحتاج متابعة'],['متوسط الإنجاز',(d.progress||0)+'%','متوسط الأوزان']].map(([title,val,sub])=>`<div class="stat"><span>${title}</span><div class="metric">${val}</div><small>${sub}</small></div>`).join('')}</div>`}
 function status(t){return `<span class="pill ${safe(t.status)}">${safe(statuses[t.status]||t.status)}</span>`}
 function miniTask(t){return `<div class="task-card">${t.assignee_removed&&t.status!=='done'?'<p class="error">⚠ الموظف محذوف — تتطلب إعادة إسناد</p>':''}<div class="detail-head"><div class="task-title">${safe(t.title)}</div>${status(t)}</div><div class="task-desc">${safe(t.assignee)} · ${safe(t.department)}</div><div class="task-meta"><span class="pill ${safe(t.priority)}">${safe(priorities[t.priority])}</span><span class="hint">الاستحقاق: ${fdate(t.due_date)}</span><b>${t.progress}%</b></div><div class="bar"><span style="width:${t.progress}%"></span></div><div class="action-row"><button class="btn secondary small" data-task="${t.id}">فتح المهمة</button></div></div>`}
@@ -304,22 +313,23 @@ function renderEmployees(){
   const director=state.me.role==='director';
   const advisor=state.me.role==='advisor';
   const executive=director||advisor;
-  const canAdd=director||state.me.role==='head';
+  const canAdd=canDo('users.create')&&(director||state.me.role==='head');
   const heads=new Map(all.filter(u=>u.role==='head').map(u=>[u.department_id,u]));
   const rows=all.map(u=>{
     const currentHead=heads.get(u.department_id);
     const occupied=u.role==='employee'&&!!currentHead;
     const nonSection=u.department_id===state.organization.general_department_id;
-    const canEdit=executive?u.role!=='director'&&(director||u.role!=='advisor'):
-      state.me.role==='head'&&u.role==='employee'&&u.department_id===state.me.department_id;
+    const canEdit=canDo('users.edit')&&(executive?u.role!=='director'&&(director||u.role!=='advisor'):
+      state.me.role==='head'&&u.role==='employee'&&u.department_id===state.me.department_id);
     const buttons=[];
-    if(u.active&&u.id!==state.me.id)buttons.push(`<button class="btn secondary small" data-call-user="${u.id}" title="اتصال صوتي أو مرئي مباشر">📞 اتصال</button>`);
-    if(executive&&u.role==='employee'){
+    if(director&&u.role!=='director')buttons.push(`<button class="btn secondary small" data-grants-user="${u.id}">🔐 الصلاحيات</button>`);
+    if(u.active&&u.id!==state.me.id&&(canDo('calls.start.audio')||canDo('calls.start.video')))buttons.push(`<button class="btn secondary small" data-call-user="${u.id}" title="اتصال صوتي أو مرئي مباشر">📞 اتصال</button>`);
+    if(executive&&canDo('users.change_role')&&u.role==='employee'){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="head" ${occupied||nonSection||!u.active?'disabled':''} title="${nonSection?'الإدارة العامة ارتباط تنظيمي وليست قسمًا له رئيس':occupied?'يجب تحويل رئيس القسم الحالي إلى موظف أولًا':!u.active?'يلزم تفعيل الحساب قبل الترقية':'تعيين رئيس قسم'}">تعيين رئيس قسم</button>`);
       if(director)buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="advisor" ${!u.active?'disabled':''}>تعيين مستشار القطاع</button>`);
-    }else if(executive&&u.role==='head'){
+    }else if(executive&&canDo('users.change_role')&&u.role==='head'){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="employee">تحويل إلى موظف</button>`);
-    }else if(director&&u.role==='advisor'){
+    }else if(director&&canDo('users.change_role')&&u.role==='advisor'){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="employee">إلغاء دور المستشار</button>`);
     }
     const roleHint=executive&&occupied?`<small class="role-hint">رئيس القسم الحالي: ${safe(currentHead.name)} — يجب تحويله إلى موظف أولًا</small>`:'';
@@ -331,6 +341,7 @@ function renderEmployees(){
   if($('newUser'))$('newUser').onclick=()=>userForm();
   if($('importUsers'))$('importUsers').onclick=()=>importEmployeesModal();
   document.querySelectorAll('[data-edit-user]').forEach(el=>el.onclick=()=>userForm(state.users.find(u=>u.id===Number(el.dataset.editUser))));
+  document.querySelectorAll('[data-grants-user]').forEach(el=>el.onclick=()=>{state.permissionSelectedUserId=Number(el.dataset.grantsUser);state.page='permissions';render()});
   document.querySelectorAll('[data-call-user]').forEach(el=>el.onclick=request(()=>openDirectCallFromEmployee(Number(el.dataset.callUser))));
   document.querySelectorAll('[data-delete-user]').forEach(el=>el.onclick=request(()=>deleteEmployeeModal(state.users.find(u=>u.id===Number(el.dataset.deleteUser)))));
   document.querySelectorAll('[data-role-user]').forEach(el=>el.onclick=()=>changeRoleModal(state.users.find(u=>u.id===Number(el.dataset.roleUser)),el.dataset.targetRole));
