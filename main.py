@@ -1479,7 +1479,31 @@ def task_decision(task_id:int,data:Decision,db:Session=Depends(get_db),s=Depends
         db.add(Message(channel=f'task:{t.id}',sender_id=me.id,text=('اعتماد المهمة: ' if data.decision=='approve' else 'إعادة للمراجعة: ')+data.reason))
     db.commit();return task_data(t,db)
 
-def allowed_channel(me,channel,db):
+def allowed_channel(me,channel,db,write=False):
+    # Reuse the current private messages and attachment storage, without new tables.
+    if re.fullmatch(r'meeting:[1-9][0-9]*',channel):
+        meeting_id=int(channel.split(':',1)[1])
+        meeting=db.get(VideoMeeting,meeting_id)
+        if not meeting or not db.scalar(select(VideoMeetingInvitation.id).where(
+            VideoMeetingInvitation.meeting_id==meeting_id,
+            VideoMeetingInvitation.user_id==me.id)):
+            return False
+        if not write:return True
+        if meeting.status!='scheduled':return False
+        starts=meeting.start_at.replace(tzinfo=meeting.start_at.tzinfo or UTC).astimezone(UTC)
+        now=NOW()
+        return starts-timedelta(minutes=15)<=now<=starts+timedelta(minutes=meeting.duration_minutes+15)
+    if re.fullmatch(r'call:[1-9][0-9]*',channel):
+        call_id=int(channel.split(':',1)[1])
+        call=db.get(DirectCall,call_id)
+        if not call:return False
+        member=db.scalar(select(DirectCallMember).where(
+            DirectCallMember.call_id==call_id,DirectCallMember.user_id==me.id))
+        if not member or member.status not in ('accepted','left'):
+            return False
+        if not write:return True
+        return member.status=='accepted' and direct_call_state(call) in ('ringing','active')
+
     if channel=='general':return True
     if channel.startswith('dept:'):
         try:dept=int(channel.split(':')[1])
@@ -1595,17 +1619,26 @@ def get_messages(channel:str='general',after:int=0,db:Session=Depends(get_db),s=
 
 @app.post('/api/messages',status_code=201)
 def post_message(data:MessageCreate,db:Session=Depends(get_db),s=Depends(require_login)):
-    if not allowed_channel(s.user,data.channel,db):raise HTTPException(403,'المحادثة غير متاحة')
+    if not allowed_channel(s.user,data.channel,db,write=True):raise HTTPException(403,'المحادثة غير متاحة')
     m=Message(channel=data.channel,sender_id=s.user_id,text=data.text.strip());db.add(m);db.flush();audit(db,s.user_id,'message',data.channel);db.commit()
     return {'id':m.id,'ok':True}
 
 @app.post('/api/messages/upload',status_code=201)
 async def post_message_with_files(channel:str=Form(...),text:str=Form(''),files:list[UploadFile]=File(...),
                                   db:Session=Depends(get_db),s=Depends(require_login)):
-    if not allowed_channel(s.user,channel,db):raise HTTPException(403,'المحادثة غير متاحة')
+    if not allowed_channel(s.user,channel,db,write=True):raise HTTPException(403,'المحادثة غير متاحة')
     message=text.strip()
     if len(message)>4000:raise HTTPException(400,'نص المحادثة طويل جدًا')
     prepared=await validate_shared_files(files,db)
+    if channel.startswith(('meeting:','call:')):
+        used=db.scalar(select(func.coalesce(func.sum(SharedAttachment.size_bytes),0))
+            .join(Message,and_(Message.id==SharedAttachment.owner_id,
+                               SharedAttachment.kind=='chat'))
+            .where(Message.channel==channel)) or 0
+        if used+sum(len(data) for _,_,data in prepared)>MAX_SHARED_THREAD_BYTES:
+            raise HTTPException(413,'تجاوزت مرفقات هذه الجلسة الحد المسموح به (50 ميجابايت)')
+    if not allowed_channel(s.user,channel,db,write=True):
+        raise HTTPException(409,'انتهت الجلسة ولا يمكن إرسال مرفقات جديدة')
     m=Message(channel=channel,sender_id=s.user_id,text=message)
     db.add(m);db.flush()
     save_shared_files(db,'chat',m.id,s.user_id,prepared)
