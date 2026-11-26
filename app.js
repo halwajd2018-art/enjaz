@@ -1,6 +1,6 @@
 'use strict';
 const root=document.getElementById('root');
-const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false,permissions:{},permissionCatalog:[],permissionSelectedUserId:null,permissionSelectedSnapshot:null};
+const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false,permissions:{},permissionCatalog:[],permissionSelectedUserId:null,permissionSelectedSnapshot:null,permissionDraft:null};
 const $=id=>document.getElementById(id);
 const safe=s=>String(s===null||s===undefined?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=dt=>dt?new Date(dt).toLocaleString('ar-SA',{dateStyle:'short',timeStyle:'short',timeZone:'Asia/Riyadh'}):'—';
@@ -250,6 +250,123 @@ async function taskDiscussionModal(taskId){
 
 function renderChat(){const available=channels();if(!available.some(c=>c.id===state.channel))state.channel='general';const body=`<div class="page-head"><div><h2>التواصل المباشر بين الإدارة والموظفين</h2><p>محادثات دائمة مع تحديث دوري كل 8 ثوانٍ.</p></div><button id="chatRefresh" class="btn secondary">تحديث الرسائل</button></div><div class="chat-grid"><div class="panel channels">${available.map(c=>`<button data-channel="${safe(c.id)}" class="${state.channel===c.id?'selected':''}">${safe(c.name)}</button>`).join('')}</div><div class="panel"><h3 id="channelName">${safe(available.find(c=>c.id===state.channel).name)}</h3><div id="messageList" class="messages"></div><form id="messageForm" class="chat-compose shared-compose"><input class="input" name="text" autocomplete="off" maxlength="4000" placeholder="اكتب توجيهًا أو رسالة أو أرفق ملفًا...">${sharedPicker()}<button class="btn" type="submit">إرسال</button></form></div></div>`;renderShell('مركز المحادثات',body);document.querySelectorAll('[data-channel]').forEach(x=>x.onclick=()=>{state.channel=x.dataset.channel;renderChat()});$('chatRefresh').onclick=refreshMessages;
  $('messageForm').onsubmit=request(async e=>{e.preventDefault();const form=e.currentTarget;if(form.dataset.sending==='1')return;const text=form.elements.text.value.trim();const files=validateSharedSelection(form);if(!text&&!files.length)return;const b=form.querySelector('button[type="submit"]');b.disabled=true;form.dataset.sending='1';try{if(files.length){const data=new FormData(form);data.set('channel',state.channel);await sendSharedForm('/messages/upload',data)}else{await api('/messages',{method:'POST',data:{channel:state.channel,text}})}form.reset();await refreshMessages()}finally{b.disabled=false;form.dataset.sending='0'}});refreshMessages();if(state.chatTimer)clearInterval(state.chatTimer);state.chatTimer=setInterval(()=>{if(state.page==='chat')refreshMessages()},8000);
+}
+
+
+async function renderPermissions(){
+ if(!state.me||state.me.role!=='director'){state.page='dashboard';return renderDashboard()}
+ if(!state.permissionCatalog.length){
+  const catalog=await api('/permissions/catalog');
+  state.permissionCatalog=catalog.permissions||[];
+ }
+ if(state.page!=='permissions')return;
+ const eligible=state.users.filter(u=>u.role!=='director');
+ const selected=eligible.some(u=>u.id===state.permissionSelectedUserId)
+   ?state.permissionSelectedUserId:eligible[0]?.id;
+ state.permissionSelectedUserId=selected||null;
+ const categories=[...new Set(state.permissionCatalog.map(p=>p.group))];
+ renderShell('إدارة صلاحيات المستخدمين', '<div class="page-head"><div><h2>المصفوفة المركزية للصلاحيات</h2>'+
+  '<p>صلاحيات جميع أقسام إنجاز، مع تخصيص لكل موظف واحتفاظ النظام بنطاق الوصول الأصلي.</p></div></div>'+
+  '<div class="note"><b>نطاق التفويض:</b> القرارات الثلاثة: يرث الدور، سماح صريح ضمن الدور، أو منع. لا تمنح هذه الشاشة صلاحيات أعلى من مستوى الموظف أو تتيح الاطلاع على سجلات غير مخصصة له. صلاحيات المدير العام محمية وغير قابلة للتفويض.</div>'+
+  '<div class="permission-summary">'+
+  '<div class="stat"><span>إجمالي الصلاحيات</span><div class="metric">'+state.permissionCatalog.length+'</div></div>'+
+  '<div class="stat"><span>قابلة للتخصيص</span><div class="metric">'+state.permissionCatalog.filter(x=>x.editable).length+'</div></div>'+
+  '<div class="stat"><span>ضوابط ثابتة</span><div class="metric">'+state.permissionCatalog.filter(x=>!x.editable).length+'</div></div></div>'+
+  '<section class="panel"><div class="permission-toolbar"><label class="form-field">المستخدم'+
+  '<select id="permissionUser" class="input">'+eligible.map(u=>'<option value="'+u.id+'" '+(u.id===selected?'selected':'')+'>'+
+  safe(u.name)+' — '+safe(roles[u.role]||u.role)+' — '+safe(affiliationLabel(u))+'</option>').join('')+'</select></label>'+
+  '<label class="form-field">المجموعة<select id="permissionGroup" class="input"><option value="">جميع المجموعات</option>'+
+  categories.map(g=>'<option value="'+safe(g)+'">'+safe(g)+'</option>').join('')+'</select></label>'+
+  '<label class="form-field">بحث<input id="permissionSearch" class="input" placeholder="ابحث عن صلاحية أو وظيفة" maxlength="100"></label></div>'+
+  '<div id="permissionTarget" class="permission-target"></div>'+
+  '<div class="permission-table-wrap"><table class="permission-table"><thead><tr>'+
+  '<th>الصلاحية</th><th>الأصل حسب الدور</th><th>الحالة الفعلية</th><th>قرار المدير</th><th>حدود الصلاحية</th>'+
+  '</tr></thead><tbody id="permissionRows"></tbody></table></div>'+
+  '<div class="permission-actions"><span id="permissionChanged" class="hint"></span>'+
+  '<button id="permissionSave" class="btn" disabled>حفظ التعديلات</button></div></section>'+
+  '<p class="footer-note">كل تعديل يُسجّل في سجل التدقيق. أي تغيير يُطبّق من الخادم في الطلب التالي، وتُحدّث الأزرار في المتصفح أثناء عمل الجلسة.</p>');
+ const control=$('permissionUser');
+ if(!eligible.length){
+  $('permissionTarget').innerHTML='<p class="hint">لا توجد حسابات موظفين يمكن إدارة صلاحياتها.</p>';
+  return;
+ }
+ control.onchange=request(async()=>{state.permissionSelectedUserId=Number(control.value);await loadPermissionTarget()});
+ $('permissionGroup').onchange=renderPermissionRows;
+ $('permissionSearch').oninput=renderPermissionRows;
+ $('permissionSave').onclick=request(savePermissionDraft);
+ await loadPermissionTarget();
+}
+async function loadPermissionTarget(){
+ const id=state.permissionSelectedUserId;
+ if(!id)return;
+ const area=$('permissionTarget');if(area)area.innerHTML='<p class="hint">جارٍ تحميل الصلاحيات...</p>';
+ const data=await api('/permissions/users/'+id);
+ if(state.permissionSelectedUserId!==id||state.page!=='permissions')return;
+ state.permissionSelectedSnapshot=data;
+ state.permissionDraft=Object.fromEntries(Object.entries(data.permissions).map(([key,val])=>[key,val.decision]));
+ const changes=$('permissionChanged');if(changes)changes.textContent='';
+ const area2=$('permissionTarget');
+ if(area2)area2.innerHTML='<b>'+safe(data.user.name)+'</b>'+
+  '<span class="hint"> · '+safe(roles[data.user.role]||data.user.role)+
+  ' · '+safe(data.user.department||'ارتباط إداري مستقل')+'</span>';
+ renderPermissionRows();
+}
+function permissionDraftChanges(){
+ const snapshot=state.permissionSelectedSnapshot;
+ if(!snapshot||!state.permissionDraft)return {};
+ const changed={};
+ for(const [key,decision] of Object.entries(state.permissionDraft)){
+  if(snapshot.permissions[key]?.decision!==decision)changed[key]=decision;
+ }
+ return changed;
+}
+function renderPermissionRows(){
+ const holder=$('permissionRows'), snapshot=state.permissionSelectedSnapshot;
+ if(!holder||!snapshot)return;
+ const role=snapshot.user.role;
+ const group=$('permissionGroup')?.value||'',term=($('permissionSearch')?.value||'').trim().toLowerCase();
+ const rows=state.permissionCatalog.filter(p=>(!group||p.group===group)&&
+  (!term||(p.label+' '+p.group+' '+p.code+' '+p.scope).toLowerCase().includes(term)));
+ let previous='';
+ const html=rows.map(p=>{
+  const userPerm=snapshot.permissions[p.code]||{};
+  const isInherited=p.roles.includes(role);
+  const canEdit=p.editable&&isInherited;
+  const status=(state.permissionDraft[p.code]==='deny')?'ممنوعة':isInherited?'مسموحة':'غير مخوّل';
+  const label=p.group!==previous?'<tr class="permission-group"><td colspan="5">'+safe(p.group)+'</td></tr>':'';
+  previous=p.group;
+  const choice=state.permissionDraft[p.code]||'inherit';
+  const control=canEdit?'<select class="input permission-decision" data-permission-code="'+safe(p.code)+'">'+
+   '<option value="inherit" '+(choice==='inherit'?'selected':'')+'>يرث المستوى</option>'+
+   '<option value="allow" '+(choice==='allow'?'selected':'')+'>سماح صريح</option>'+
+   '<option value="deny" '+(choice==='deny'?'selected':'')+'>منع</option></select>':
+   '<span class="permission-locked">'+(p.editable?'محكومة بالمستوى':'🔒 ثابتة')+'</span>';
+  return label+'<tr><td><b>'+safe(p.label)+'</b><small>'+safe(p.code)+'</small></td>'+
+   '<td>'+ (isInherited?'مسموح':'غير مسموح')+'</td>'+
+   '<td><span class="pill '+(status==='مسموحة'?'done':'offline')+'">'+status+'</span></td>'+
+   '<td>'+control+'</td><td><small>'+safe(p.scope)+'</small></td></tr>';
+ }).join('');
+ holder.innerHTML=html||'<tr><td colspan="5" class="hint">لا توجد صلاحيات مطابقة.</td></tr>';
+ holder.querySelectorAll('[data-permission-code]').forEach(select=>select.onchange=()=>{
+  state.permissionDraft[select.dataset.permissionCode]=select.value;
+  renderPermissionRows();
+ });
+ const updated=Object.keys(permissionDraftChanges()).length;
+ if($('permissionSave'))$('permissionSave').disabled=!updated;
+ if($('permissionChanged'))$('permissionChanged').textContent=updated?
+  'تغييرات غير محفوظة: '+updated+' صلاحية':'لا توجد تغييرات غير محفوظة';
+}
+async function savePermissionDraft(){
+ const id=state.permissionSelectedUserId;
+ const data=permissionDraftChanges();
+ if(!Object.keys(data).length)return;
+ if(!confirm('هل تؤكد تطبيق '+Object.keys(data).length+' تعديل/تعديلات على صلاحيات هذا المستخدم؟'))return;
+ const button=$('permissionSave');if(button)button.disabled=true;
+ try{
+  await api('/permissions/users/'+id,{method:'PATCH',data:{decisions:data}});
+  await loadPermissionTarget();
+  toast('تم حفظ الصلاحيات وتوثيقها في سجل التدقيق');
+ }finally{if(button)button.disabled=false}
 }
 
 function renderOrganization(){
