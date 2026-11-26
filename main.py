@@ -896,6 +896,29 @@ def register_verify(data:RegistrationVerifyBody,db:Session=Depends(get_db)):
     return {'ok':True,'status':'awaiting_approval',
             'message':'تم تأكيد البريد الإلكتروني، وأُحيل طلبك إلى مدير المنصة للموافقة'}
 
+@app.post('/api/registrations/diagnose')
+def diagnose_registration(data:RegistrationEmailBody,db:Session=Depends(get_db),
+                          s=Depends(require_login)):
+    """Director-only read-only diagnosis. Never expose whether an email exists publicly."""
+    require_registration_director(s)
+    email=registration_email_address(data.email)
+    user=db.scalar(select(User).where(User.email==email))
+    request=db.scalar(select(RegistrationRequest).where(RegistrationRequest.email==email))
+    if user:
+        return {'state':'existing_account','role':user.role,'active':user.active,
+                'registration_status':request.status if request else None,
+                'message':'البريد مرتبط بحساب موجود في إنجاز؛ التسجيل الذاتي لا يرسل إليه رمز تحقق'}
+    if request:
+        return {'state':'registration_request','status':request.status,
+                'last_sent_at':iso(request.last_sent_at),
+                'otp_expires_at':iso(request.otp_expires_at),
+                'otp_attempts':request.otp_attempts,
+                'email_verified_at':iso(request.email_verified_at),
+                'message':('الطلب في مرحلة تأكيد البريد؛ وقت الإرسال هو وقت محاولة الإرسال وليس إثبات التسليم'
+                           if request.status=='otp_pending'
+                           else 'يوجد طلب تسجيل سابق بهذه الحالة؛ لن يُرسل رمز تسجيل جديد')}
+    return {'state':'not_found','message':'لم يُعثر على حساب أو طلب بهذا البريد في بيئة الاختبار'}
+
 @app.get('/api/registrations')
 def admin_registrations(db:Session=Depends(get_db),s=Depends(require_login)):
     require_registration_director(s)
