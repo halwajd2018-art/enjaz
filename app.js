@@ -869,7 +869,7 @@ function showDirectIncoming(call){
  const caller=call.participants.find(p=>p.id===call.initiator_id);
  box.innerHTML='<div class="direct-incoming-title">📞 اتصال '+(call.mode==='audio'?'صوتي':'مرئي')+' وارد</div>'+
   '<p><b>'+safe(caller?.name||'موظف')+'</b> يدعوك إلى اتصال مباشر'+(call.participants.length>2?' مع '+(call.participants.length-2)+' مشاركين آخرين':'')+'</p>'+
-  '<div class="action-row"><button class="btn" id="acceptDirectIncoming">قبول الاتصال</button>'+
+  '<div class="action-row"><button class="btn" id="acceptDirectIncoming" '+(!canDo('calls.accept')?'disabled':'')+'>قبول الاتصال</button>'+
   '<button class="btn danger" id="declineDirectIncoming">رفض</button></div>';
  $('acceptDirectIncoming').onclick=request(async()=>{if(state.videoRoom)throw Error('أنه مشاركتك في الاجتماع المجدول أولًا');await acceptDirectCall(call.id)});
  $('declineDirectIncoming').onclick=request(async()=>{await api('/calls/'+call.id+'/decline',{method:'POST'});box.remove();await pollDirectCalls()});
@@ -925,8 +925,8 @@ function updateDirectCallHistory(){
   const names=c.participants.filter(p=>p.id!==state.me.id).map(p=>safe(p.name)).join('، ');
   const actions=[];
   if(['accepted','left'].includes(c.my_status))actions.push('<button class="btn secondary small" data-direct-chat="'+c.id+'">الدردشة</button>');
-  if(c.incoming)actions.push('<button class="btn small" data-direct-accept="'+c.id+'">قبول</button><button class="btn danger small" data-direct-decline="'+c.id+'">رفض</button>');
-  if(['ringing','active'].includes(c.status)&&c.my_status==='accepted')actions.push('<button class="btn secondary small" data-direct-join="'+c.id+'">دخول الاتصال</button>');
+  if(c.incoming)actions.push('<button class="btn small" data-direct-accept="'+c.id+'" '+(!canDo('calls.accept')?'disabled':'')+'>قبول</button><button class="btn danger small" data-direct-decline="'+c.id+'">رفض</button>');
+  if(canDo('calls.join')&&['ringing','active'].includes(c.status)&&c.my_status==='accepted')actions.push('<button class="btn secondary small" data-direct-join="'+c.id+'">دخول الاتصال</button>');
   if(c.is_initiator&&['ringing','active','ending'].includes(c.status))actions.push('<button class="btn danger small" data-direct-end="'+c.id+'">'+(c.status==='ending'?'إعادة الإغلاق':'إنهاء للجميع')+'</button>');
   return '<div class="direct-history-row"><div><b>'+(c.mode==='audio'?'🎙️ اتصال صوتي':'📹 اتصال مرئي')+' · '+safe(directStatusLabels[c.status]||c.status)+'</b>'+
    '<small>'+safe(fmt(c.created_at))+' · '+(names||'—')+' · '+c.participants.length+' مشاركين</small></div>'+
@@ -943,6 +943,7 @@ async function openDirectCallFromEmployee(userId){
  const contacts=await api('/calls/contacts');
  const user=contacts.find(u=>u.id===userId);
  if(!user)throw Error('هذا الموظف غير متاح للاتصال');
+ if(!canDo('calls.start.audio')&&!canDo('calls.start.video'))throw Error('ليس لديك صلاحية بدء مكالمة');
  modal('بدء اتصال مع '+user.name,
   '<div class="note">سيظهر للموظف إشعار داخل منصة إنجاز للقبول أو الرفض.</div>'+
   '<div class="action-row"><button id="quickVideoCall" class="btn" '+(!canDo('calls.start.video')?'disabled':'')+'>📹 اتصال مرئي</button>'+
@@ -977,7 +978,7 @@ async function connectDirectCall(call){
   '<div class="meeting-controls"><button class="btn secondary" id="meetingMic">🎤 تشغيل الميكروفون</button>'+
   '<button class="btn secondary" id="meetingCam">📷 تشغيل الكاميرا</button>'+
   '<button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button>'+
-  '<button class="btn outline" id="directInviteMore" '+(!call.is_initiator||call.participants.length>=16?'disabled':'')+'>＋ إضافة مشارك</button>'+
+  '<button class="btn outline" id="directInviteMore" '+(!call.is_initiator||call.participants.length>=16||!canDo('calls.invite')?'disabled':'')+'>＋ إضافة مشارك</button>'+
   '<button class="btn danger" id="directLeaveCall">'+(call.is_initiator?'إنهاء الاتصال للجميع':'مغادرة الاتصال')+'</button></div>'+
   '<p class="hint">لا تحتاج المكالمة إلى موعد أو رابط عام. يُسمح بالانضمام للمستخدمين الذين قبلوا دعوتهم فقط.</p></section>'+roomChatHtml('call:'+call.id)+'</div>');
  mountRoomChat('call:'+call.id);
