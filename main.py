@@ -650,6 +650,377 @@ class MessageCreate(BaseModel):
 class Pulse(BaseModel):
     active: bool = False
 
+
+# -------------------------------------------------------------------------
+# Self-registration. Untrusted applicants are NOT users until director approval.
+# Email verification, SMTP and activation are fail-closed and opt-in.
+# -------------------------------------------------------------------------
+REGISTRATION_OTP_TTL = timedelta(minutes=10)
+REGISTRATION_ACTIVATION_TTL = timedelta(hours=48)
+REGISTRATION_GENERIC = 'إذا كان البريد صالحًا للتسجيل فستصلك رسالة التحقق. افحص البريد غير المرغوب فيه.'
+REGISTRATION_ALLOWED_ROLES = ('employee','head','advisor')
+
+def registration_email_address(raw: str) -> str:
+    value=(raw or '').strip().lower()
+    if not 5 <= len(value) <= 200 or not re.fullmatch(r'[^@\s\x00-\x1f]+@[^@\s\x00-\x1f]+\.[^@\s\x00-\x1f]+',value):
+        raise HTTPException(422,'البريد الإلكتروني غير صحيح')
+    return value
+
+def registration_full_name(raw: str) -> str:
+    value=' '.join((raw or '').split())
+    if not 2 <= len(value) <= 160 or any(ord(c)<32 for c in value):
+        raise HTTPException(422,'يرجى إدخال الاسم الكامل (2–160 حرفًا)')
+    return value
+
+def registration_base_url() -> str:
+    value=(os.getenv('REGISTRATION_BASE_URL') or os.getenv('APP_BASE_URL') or '').strip().rstrip('/')
+    parsed=urlsplit(value)
+    if (parsed.scheme not in (('https',) if IS_PROD else ('http','https'))
+        or not parsed.netloc or parsed.username or parsed.password
+        or parsed.path not in ('','/') or parsed.query or parsed.fragment):
+        return ''
+    return value
+
+def registration_available() -> bool:
+    if os.getenv('REGISTRATION_ENABLED','').lower()!='true':
+        return False
+    secret=os.getenv('REGISTRATION_OTP_PEPPER','')
+    host=os.getenv('SMTP_HOST','').strip()
+    sender=os.getenv('SMTP_FROM','').strip()
+    port=os.getenv('SMTP_PORT','587').strip()
+    user=os.getenv('SMTP_USERNAME','').strip()
+    password=os.getenv('SMTP_PASSWORD','')
+    if len(secret)<32 or not host or not sender or not registration_base_url():
+        return False
+    if '\n' in sender or '\r' in sender or '@' not in sender or port not in ('465','587'):
+        return False
+    if bool(user)!=bool(password):
+        return False
+    return True
+
+def require_registration_available():
+    if not registration_available():
+        raise HTTPException(503,'التسجيل الذاتي غير متاح حاليًا')
+
+def reg_hmac(value:str)->str:
+    key=os.getenv('REGISTRATION_OTP_PEPPER','')
+    if len(key)<32:
+        raise HTTPException(503,'التحقق الإلكتروني غير مهيأ')
+    return hmac.new(key.encode(),value.encode(),hashlib.sha256).hexdigest()
+
+def reg_token_digest(token:str)->str:
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+def reg_client_fingerprint(request:Request)->str:
+    # Do not trust user-controlled X-Forwarded-For headers here.
+    address=(request.client.host if request.client else 'unknown')
+    return reg_hmac('ip:'+address)
+
+def reg_limit_email_sends(db:Session,request:Request,email:str):
+    now=NOW()
+    current=now-timedelta(hours=1)
+    mailhash=reg_hmac('mail:'+email)
+    clienthash=reg_client_fingerprint(request)
+    if (db.scalar(select(func.count(RegistrationSendAttempt.id)).where(
+            RegistrationSendAttempt.attempted_at>=current)) or 0)>=200:
+        raise HTTPException(429,'ازدحام في خدمة التسجيل. حاول لاحقًا')
+    if (db.scalar(select(func.count(RegistrationSendAttempt.id)).where(
+            RegistrationSendAttempt.attempted_at>=current,
+            RegistrationSendAttempt.email_digest==mailhash)) or 0)>=3:
+        raise HTTPException(429,'تجاوزت الحد المسموح لإرسال الرموز لهذا البريد')
+    if (db.scalar(select(func.count(RegistrationSendAttempt.id)).where(
+            RegistrationSendAttempt.attempted_at>=current,
+            RegistrationSendAttempt.client_digest==clienthash)) or 0)>=20:
+        raise HTTPException(429,'عدد كبير من الطلبات. حاول لاحقًا')
+    db.add(RegistrationSendAttempt(email_digest=mailhash,client_digest=clienthash,attempted_at=now))
+
+def send_registration_email(destination:str,subject:str,body:str):
+    """SMTP TLS only. No external mail is attempted in tests without explicit mock."""
+    require_registration_available()
+    msg=EmailMessage()
+    msg['From']=os.getenv('SMTP_FROM','').strip()
+    msg['To']=destination
+    msg['Subject']=subject
+    msg.set_content(body)
+    host=os.getenv('SMTP_HOST','').strip()
+    port=int(os.getenv('SMTP_PORT','587'))
+    context=ssl.create_default_context()
+    if port==465:
+        transport=smtplib.SMTP_SSL(host,port,timeout=12,context=context)
+    else:
+        transport=smtplib.SMTP(host,port,timeout=12)
+    try:
+        transport.ehlo()
+        if port==587:
+            transport.starttls(context=context)
+            transport.ehlo()
+        username=os.getenv('SMTP_USERNAME','').strip()
+        if username:
+            transport.login(username,os.getenv('SMTP_PASSWORD',''))
+        transport.send_message(msg)
+    finally:
+        transport.quit()
+
+def reg_send_otp(db:Session,req:RegistrationRequest,request:Request):
+    now=NOW()
+    if req.last_sent_at:
+        recent=req.last_sent_at.replace(tzinfo=req.last_sent_at.tzinfo or UTC)
+        if now<recent+timedelta(seconds=60):
+            raise HTTPException(429,'انتظر دقيقة قبل طلب رمز تحقق جديد')
+    reg_limit_email_sends(db,request,req.email)
+    code=f'{secrets.randbelow(1000000):06d}'
+    nonce=secrets.token_urlsafe(24)
+    req.otp_nonce=nonce
+    req.otp_digest=reg_hmac('otp:'+req.email+':'+nonce+':'+code)
+    req.otp_expires_at=now+REGISTRATION_OTP_TTL
+    req.otp_attempts=0
+    req.last_sent_at=now
+    req.status='otp_pending'
+    db.commit()
+    # A send failure leaves the code invalid for anyone who did not get it;
+    # a future request may retry after rate/cooldown limits.
+    try:
+        send_registration_email(req.email,'رمز تأكيد التسجيل في إنجاز',
+            'مرحبًا '+req.full_name+'،\n\nرمز التحقق من بريدك الإلكتروني: '+code+
+            '\n\nتنتهي صلاحية الرمز بعد 10 دقائق. لا تشاركه مع أي شخص.'+
+            '\n\nالتحقق من البريد لا يمنح صلاحية الدخول حتى يعتمد مدير المنصة طلبك.')
+    except Exception:
+        raise HTTPException(503,'تعذر إرسال رمز التحقق حاليًا. حاول لاحقًا')
+
+def reg_admin_item(req:RegistrationRequest,db:Session):
+    department=db.get(Department,req.department_id) if req.department_id else None
+    return {'id':req.id,'name':req.full_name,'email':req.email,'status':req.status,
+            'created_at':iso(req.created_at),'email_verified_at':iso(req.email_verified_at),
+            'reviewed_at':iso(req.reviewed_at),'role':req.role,
+            'department_id':req.department_id,
+            'department':department.name if department else None,
+            'rejection_reason':req.rejection_reason,'user_id':req.user_id,
+            'activation_expires_at':iso(req.activation_expires_at),
+            'activated_at':iso(req.activated_at)}
+
+def require_registration_director(s):
+    if s.user.role!='director':
+        raise HTTPException(403,'طلبات التسجيل متاحة لمدير عام الإدارة فقط')
+
+@app.get('/api/registration/config')
+def registration_config():
+    return {'registration_enabled':registration_available(),'otp_minutes':10}
+
+@app.post('/api/registration/start')
+def register_start(data:RegistrationStartBody,request:Request,db:Session=Depends(get_db)):
+    require_registration_available()
+    email=registration_email_address(data.email)
+    name=registration_full_name(data.full_name)
+    current=db.scalar(select(User.id).where(User.email==email))
+    if current:
+        return {'ok':True,'message':REGISTRATION_GENERIC}
+    # Serialize repeated submissions for an existing application.
+    reg=db.scalar(select(RegistrationRequest).where(
+        RegistrationRequest.email==email).with_for_update())
+    if reg and reg.status!='otp_pending':
+        return {'ok':True,'message':REGISTRATION_GENERIC}
+    if not reg:
+        reg=RegistrationRequest(full_name=name,email=email,status='otp_pending',created_at=NOW())
+        db.add(reg)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            return {'ok':True,'message':REGISTRATION_GENERIC}
+    else:
+        reg.full_name=name
+    reg_send_otp(db,reg,request)
+    return {'ok':True,'message':REGISTRATION_GENERIC}
+
+@app.post('/api/registration/resend')
+def register_resend(data:RegistrationEmailBody,request:Request,db:Session=Depends(get_db)):
+    require_registration_available()
+    email=registration_email_address(data.email)
+    reg=db.scalar(select(RegistrationRequest).where(
+        RegistrationRequest.email==email).with_for_update())
+    if reg and reg.status=='otp_pending':
+        reg_send_otp(db,reg,request)
+    return {'ok':True,'message':REGISTRATION_GENERIC}
+
+@app.post('/api/registration/verify')
+def register_verify(data:RegistrationVerifyBody,db:Session=Depends(get_db)):
+    require_registration_available()
+    email=registration_email_address(data.email)
+    if not re.fullmatch(r'[0-9]{6}',data.code):
+        raise HTTPException(422,'اكتب رمزًا مكونًا من 6 أرقام')
+    reg=db.scalar(select(RegistrationRequest).where(
+        RegistrationRequest.email==email).with_for_update())
+    if not reg or reg.status!='otp_pending' or not reg.otp_digest or not reg.otp_expires_at:
+        raise HTTPException(400,'طلب التحقق غير متاح. أعد إرسال الرمز')
+    expires=reg.otp_expires_at.replace(tzinfo=reg.otp_expires_at.tzinfo or UTC)
+    if NOW()>expires:
+        raise HTTPException(400,'انتهت صلاحية الرمز. أعد إرساله')
+    if reg.otp_attempts>=5:
+        raise HTTPException(429,'عدد محاولات التحقق تجاوز الحد المسموح')
+    expected=reg_hmac('otp:'+email+':'+reg.otp_nonce+':'+data.code)
+    if not hmac.compare_digest(reg.otp_digest,expected):
+        reg.otp_attempts+=1
+        db.commit()
+        raise HTTPException(400,'رمز التحقق غير صحيح')
+    reg.otp_digest=None
+    reg.otp_nonce=None
+    reg.otp_expires_at=None
+    reg.status='awaiting_approval'
+    reg.email_verified_at=NOW()
+    db.add(Audit(actor_id=None,action='registration_email_verified',
+                 details=f'registration={reg.id}'))
+    db.commit()
+    return {'ok':True,'status':'awaiting_approval',
+            'message':'تم تأكيد البريد الإلكتروني، وأُحيل طلبك إلى مدير المنصة للموافقة'}
+
+@app.get('/api/registrations')
+def admin_registrations(db:Session=Depends(get_db),s=Depends(require_login)):
+    require_registration_director(s)
+    items=db.scalars(select(RegistrationRequest).where(
+        RegistrationRequest.status!='otp_pending')
+        .order_by(RegistrationRequest.created_at.desc(),RegistrationRequest.id.desc())
+        .limit(250)).all()
+    return {'items':[reg_admin_item(x,db) for x in items],
+            'pending':sum(x.status=='awaiting_approval' for x in items)}
+
+@app.get('/api/registrations/count')
+def admin_registrations_count(db:Session=Depends(get_db),s=Depends(require_login)):
+    require_registration_director(s)
+    count=db.scalar(select(func.count(RegistrationRequest.id)).where(
+        RegistrationRequest.status=='awaiting_approval')) or 0
+    return {'pending':count}
+
+def reg_activation_notice(reg:RegistrationRequest,token:str):
+    link=registration_base_url()+'/#activate='+quote(token,safe='')
+    send_registration_email(
+        reg.email,'الموافقة على تسجيلك في منصة إنجاز',
+        'مرحبًا '+reg.full_name+'،\n\nتمت الموافقة على تسجيلك في منصة إنجاز.\n'
+        'لتعيين كلمة مرور شخصية وتفعيل الحساب افتح الرابط التالي:\n'+link+
+        '\n\nالرابط صالح لمدة 48 ساعة ولمرة واحدة. لا تشاركه مع أحد.\n'
+        'إذا لم تطلب هذا التسجيل، فتجاهل الرسالة.')
+
+@app.post('/api/registrations/{registration_id}/approve')
+def approve_registration(registration_id:int,data:RegistrationApprovalBody,
+                         db:Session=Depends(get_db),s=Depends(require_login)):
+    require_registration_director(s)
+    if data.role not in REGISTRATION_ALLOWED_ROLES:
+        raise HTTPException(422,'المستوى الإداري المطلوب غير متاح للتسجيل')
+    reg=db.scalar(select(RegistrationRequest).where(
+        RegistrationRequest.id==registration_id).with_for_update())
+    if not reg or reg.status!='awaiting_approval' or not reg.email_verified_at:
+        raise HTTPException(409,'الطلب غير موجود أو ليس بانتظار الموافقة')
+    if db.scalar(select(User.id).where(User.email==reg.email)):
+        raise HTTPException(409,'يوجد حساب مسجل بهذا البريد بالفعل')
+    if data.role=='advisor':
+        if data.department_id is not None:
+            raise HTTPException(422,'مستشار القطاع مستقل ولا يتبع قسمًا')
+        department_id=None
+    else:
+        department_id=data.department_id
+        if not department_id or not db.get(Department,department_id):
+            raise HTTPException(422,'اختر القسم الإداري للموظف')
+        if data.role=='head':
+            require_free_department_head(db,department_id)
+    temporary=secrets.token_urlsafe(48)
+    user=User(full_name=reg.full_name,email=reg.email,role=data.role,
+              department_id=department_id,password_hash=password_hasher.hash(temporary),
+              active=False,must_change_password=False)
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'تعذر إنشاء المستخدم؛ البريد مسجل مسبقًا')
+    token=secrets.token_urlsafe(40)
+    reg.status='approved'
+    reg.role=data.role
+    reg.department_id=department_id
+    reg.user_id=user.id
+    reg.reviewed_at=NOW()
+    reg.reviewed_by=s.user_id
+    reg.activation_digest=reg_token_digest(token)
+    reg.activation_expires_at=NOW()+REGISTRATION_ACTIVATION_TTL
+    audit(db,s.user_id,'registration_approved',
+          f'registration={reg.id};user={user.id};role={data.role};department={department_id}')
+    db.commit()
+    try:
+        reg_activation_notice(reg,token)
+    except Exception:
+        raise HTTPException(503,'تم اعتماد الطلب وحفظ الحساب غير النشط، لكن تعذر إرسال رابط التفعيل؛ استخدم إعادة إرسال رابط التفعيل')
+    return {'ok':True,'status':'approved','user_id':user.id,
+            'message':'تمت الموافقة وإرسال رابط تفعيل الحساب'}
+
+@app.post('/api/registrations/{registration_id}/reject')
+def reject_registration(registration_id:int,data:RegistrationRejectionBody,
+                        db:Session=Depends(get_db),s=Depends(require_login)):
+    require_registration_director(s)
+    reg=db.scalar(select(RegistrationRequest).where(
+        RegistrationRequest.id==registration_id).with_for_update())
+    if not reg or reg.status!='awaiting_approval':
+        raise HTTPException(409,'يمكن رفض الطلبات التي تنتظر الموافقة فقط')
+    reg.status='rejected'
+    reg.rejection_reason=data.reason.strip()
+    reg.reviewed_by=s.user_id
+    reg.reviewed_at=NOW()
+    reg.otp_nonce=reg.otp_digest=None
+    audit(db,s.user_id,'registration_rejected',
+          f'registration={reg.id};reason={reg.rejection_reason}')
+    db.commit()
+    return {'ok':True,'status':'rejected'}
+
+@app.post('/api/registrations/{registration_id}/resend-activation')
+def resend_registration_activation(registration_id:int,
+                                   db:Session=Depends(get_db),s=Depends(require_login)):
+    require_registration_director(s)
+    reg=db.scalar(select(RegistrationRequest).where(
+        RegistrationRequest.id==registration_id).with_for_update())
+    if not reg or reg.status!='approved' or not reg.user_id:
+        raise HTTPException(409,'إعادة إرسال رابط التفعيل متاحة للحسابات المعتمدة وغير المفعلة')
+    account=db.get(User,reg.user_id)
+    if not account or account.active:
+        raise HTTPException(409,'هذا الحساب نشط أو غير متاح')
+    if reg.activation_expires_at:
+        last_expiry=reg.activation_expires_at.replace(tzinfo=reg.activation_expires_at.tzinfo or UTC)
+        # A 48h expiry means the first resend may be done after 60s
+        if NOW()<last_expiry-REGISTRATION_ACTIVATION_TTL+timedelta(seconds=60):
+            raise HTTPException(429,'انتظر دقيقة قبل إعادة إرسال رابط التفعيل')
+    token=secrets.token_urlsafe(40)
+    reg.activation_digest=reg_token_digest(token)
+    reg.activation_expires_at=NOW()+REGISTRATION_ACTIVATION_TTL
+    audit(db,s.user_id,'registration_activation_resent',f'registration={reg.id}')
+    db.commit()
+    try:
+        reg_activation_notice(reg,token)
+    except Exception:
+        raise HTTPException(503,'تعذر إرسال رابط التفعيل. حاول مرة أخرى لاحقًا')
+    return {'ok':True,'message':'تم إرسال رابط تفعيل جديد'}
+
+@app.post('/api/registration/activate')
+def activate_registration(data:RegistrationActivationBody,db:Session=Depends(get_db)):
+    require_registration_available()
+    tokenhash=reg_token_digest(data.token)
+    reg=db.scalar(select(RegistrationRequest).where(
+        RegistrationRequest.activation_digest==tokenhash).with_for_update())
+    if not reg or reg.status!='approved' or not reg.user_id or not reg.activation_expires_at:
+        raise HTTPException(400,'رابط التفعيل غير صالح أو سبق استخدامه')
+    expires=reg.activation_expires_at.replace(tzinfo=reg.activation_expires_at.tzinfo or UTC)
+    if NOW()>expires:
+        raise HTTPException(400,'انتهت صلاحية رابط التفعيل؛ اطلب من مدير المنصة إرساله مجددًا')
+    user=db.scalar(select(User).where(User.id==reg.user_id).with_for_update())
+    if not user or user.active or user.email!=reg.email or db.get(UserRemoval,user.id):
+        raise HTTPException(409,'لا يمكن تفعيل الحساب حاليًا')
+    user.password_hash=password_hasher.hash(data.password)
+    user.active=True
+    user.must_change_password=False
+    reg.activation_digest=None
+    reg.activation_expires_at=None
+    reg.activated_at=NOW()
+    reg.status='active'
+    db.add(Audit(actor_id=user.id,action='registration_activated',
+                 details=f'registration={reg.id}'))
+    db.commit()
+    return {'ok':True,'status':'active','message':'تم تعيين كلمة المرور وتفعيل حسابك. يمكنك تسجيل الدخول الآن'}
+
 @app.get('/')
 def index():
     return FileResponse(STATIC/'index.html')
