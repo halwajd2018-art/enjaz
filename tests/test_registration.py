@@ -251,6 +251,13 @@ class RegistrationSecurityTests(unittest.TestCase):
         self.assertEqual(req.status,'approved')
         user=self.db.get(m.User,req.user_id)
         self.assertFalse(user.active)
+        # Resend is throttled even if the previous SMTP delivery failed.
+        with self.assertRaises(HTTPException) as cooldown:
+            m.resend_registration_activation(req.id,db=self.db,s=self.admin())
+        self.assertEqual(cooldown.exception.status_code,429)
+        # Simulate time passing beyond the one-minute cooldown.
+        req.activation_expires_at=m.NOW()+m.REGISTRATION_ACTIVATION_TTL-m.timedelta(seconds=70)
+        self.db.commit()
         self.assertTrue(m.resend_registration_activation(req.id,db=self.db,s=self.admin())['ok'])
         self.assertIsNotNone(self.activation_token())
 
