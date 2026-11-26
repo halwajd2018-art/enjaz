@@ -136,6 +136,33 @@ class RegistrationSecurityTests(unittest.TestCase):
         self.assertEqual(err.exception.status_code,429)
         self.assertEqual(len(self.sent),3)
 
+    def test_director_only_diagnosis_identifies_existing_pending_and_verified_without_otp(self):
+        email='new@example.invalid'
+        with self.assertRaises(HTTPException) as e:
+            m.diagnose_registration(m.RegistrationEmailBody(email=email),
+                                    db=self.db,s=self.normal_user())
+        self.assertEqual(e.exception.status_code,403)
+        missing=m.diagnose_registration(m.RegistrationEmailBody(email=email),
+                                        db=self.db,s=self.admin())
+        self.assertEqual(missing['state'],'not_found')
+        existing=m.diagnose_registration(m.RegistrationEmailBody(
+            email='existing@example.invalid'),db=self.db,s=self.admin())
+        self.assertEqual(existing['state'],'existing_account')
+        self.assertTrue(existing['active'])
+        code=self.begin(email)
+        pending=m.diagnose_registration(m.RegistrationEmailBody(email=email),
+                                        db=self.db,s=self.admin())
+        self.assertEqual(pending['state'],'registration_request')
+        self.assertEqual(pending['status'],'otp_pending')
+        self.assertIsNotNone(pending['last_sent_at'])
+        self.assertNotIn(code,str(pending))
+        self.verify(code,email)
+        verified=m.diagnose_registration(m.RegistrationEmailBody(email=email),
+                                         db=self.db,s=self.admin())
+        self.assertEqual(verified['status'],'awaiting_approval')
+        self.assertNotIn(code,str(verified))
+        self.assertIsNone(verified['otp_expires_at'])
+
     def test_existing_account_cannot_request_new_user(self):
         before=len(self.sent)
         result=m.register_start(m.RegistrationStartBody(full_name='Fake Entry',
