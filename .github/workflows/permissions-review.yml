@@ -34,6 +34,7 @@ jobs:
           python -m py_compile tests/test_permissions.py
       - name: Run isolated unit and authorization tests (no real DB or video keys)
         run: |
-          mkdir -p /tmp/enjaz-review/app
+          mkdir -p /tmp/enjaz-review/app/static
           cp main.py __init__.py /tmp/enjaz-review/app/
+          cp index.html app.js style.css /tmp/enjaz-review/app/static/
           PYTHONPATH=/tmp/enjaz-review python -m unittest discover -s tests -p 'test_*.py' -v
