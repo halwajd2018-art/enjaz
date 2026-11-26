@@ -722,7 +722,7 @@ def require_free_department_head(db: Session, department_id: int):
     dept = db.scalar(select(Department).where(Department.id == department_id).with_for_update())
     if not dept:
         raise HTTPException(400, 'القسم المحدد غير موجود')
-    if dept.name == GENERAL_MANAGEMENT_NAME:
+    if dept.id == general_department_id(db):
         raise HTTPException(400, 'الإدارة العامة ارتباط تنظيمي مستقل، وليست قسمًا يُعين له رئيس قسم')
     current = db.scalar(select(User).where(User.department_id == department_id,
                                            User.role == 'head', ~User.id.in_(select(UserRemoval.user_id))).order_by(User.id).limit(1))
@@ -763,7 +763,7 @@ def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get
         if data.role != 'employee':
             raise HTTPException(409, 'يجب تحويل مستشار القطاع إلى موظف أولًا')
         if data.department_id is None:
-            general = db.scalar(select(Department).where(Department.name == GENERAL_MANAGEMENT_NAME))
+            general = general_department(db)
             if general is None:
                 raise HTTPException(409, 'وحدة الإدارة العامة غير مسجلة؛ أعد تشغيل التطبيق')
             new_department_id = general.id
@@ -963,6 +963,7 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
         departments = db.scalars(select(Department)).all()
         departments_by_id = {d.id:d for d in departments}
         departments_by_name = {d.name.strip():d for d in departments}
+        role_aliases = {**IMPORT_ROLE_ALIASES, **{name.casefold():role for role,name in organization_snapshot(db)['roles'].items()}}
         default_dept = departments_by_id.get(default_department_id) if default_department_id else None
         if default_department_id is not None and default_dept is None:
             raise HTTPException(400, 'القسم الافتراضي المحدد غير موجود')
@@ -998,7 +999,7 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
                 seen.add(email)
             if not isinstance(raw('password').value if raw('password') else None, str) or not 12 <= len(password) <= 128:
                 row_errors.append('كلمة المرور يجب أن تكون نصًا من 12 إلى 128 حرفًا')
-            role = IMPORT_ROLE_ALIASES.get(role_text.lower())
+            role = role_aliases.get(role_text.casefold())
             if not role:
                 row_errors.append('الدور يجب أن يكون موظفًا أو رئيس قسم أو مستشار القطاع')
             # Even if the Excel file contains a department for an adviser,
@@ -1006,7 +1007,7 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
             dept = None if role == 'advisor' else (departments_by_name.get(department_text) if department_text else default_dept)
             if role != 'advisor' and not dept:
                 row_errors.append('القسم غير موجود أو لم يتم اختيار قسم افتراضي')
-            if role == 'head' and dept and dept.name == GENERAL_MANAGEMENT_NAME:
+            if role == 'head' and dept and dept.id == general_department_id(db):
                 row_errors.append('الإدارة العامة ليست قسمًا ولا يمكن تعيين رئيس قسم لها')
             if row_errors:
                 errors.append({'row':rownum, 'message':'؛ '.join(row_errors)})
@@ -1696,9 +1697,10 @@ def presence(db: Session = Depends(get_db), s = Depends(require_login)):
     # 'الإدارة العامة' unit without making the director an employee of it, and
     # without showing two duplicate cards for that name.
     if any(u.department_id is None and u.role != 'advisor' for u in visible_users):
-        office = next((g for g in groups if g['department'] == GENERAL_MANAGEMENT_NAME), None)
+        general_unit = general_department(db)
+        office = next((g for g in groups if g['department_id'] == (general_unit.id if general_unit else None)), None)
         if office is None:
-            office = {'department_id': None, 'department': GENERAL_MANAGEMENT_NAME, 'total_staff': 0,
+            office = {'department_id': None, 'department': general_unit.name if general_unit else GENERAL_MANAGEMENT_NAME, 'total_staff': 0,
                       'online_count': 0, 'employees': []}
             groups.append(office)
         groups_by_id[None] = office
