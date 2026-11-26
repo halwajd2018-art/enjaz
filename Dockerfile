@@ -5,8 +5,8 @@ RUN set -eux; \
     npm pack livekit-client@2.25.0 --ignore-scripts --pack-destination /tmp --silent; \
     mkdir -p /opt/livekit; \
     tar -xzf /tmp/livekit-client-2.25.0.tgz -C /opt/livekit \
-      package/dist/livekit-client.umd.min.js; \
-    test -s /opt/livekit/package/dist/livekit-client.umd.min.js
+      package/dist/livekit-client.umd.js; \
+    test -s /opt/livekit/package/dist/livekit-client.umd.js
 
 FROM python:3.12-slim
 
@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY main.py /app/app/main.py
 COPY __init__.py /app/app/__init__.py
 COPY index.html app.js style.css /app/app/static/
-COPY --from=livekit-sdk /opt/livekit/package/dist/livekit-client.umd.min.js /app/app/static/livekit-client.umd.min.js
+COPY --from=livekit-sdk /opt/livekit/package/dist/livekit-client.umd.js /app/app/static/livekit-client.umd.min.js
 
 USER enjaz
 
