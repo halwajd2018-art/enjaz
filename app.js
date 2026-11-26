@@ -967,7 +967,7 @@ function renderRegistrationVerify(email){
  if(state.me)return;
  root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
   '<div class="logo-big">✉</div><h1>تأكيد البريد الإلكتروني</h1>'+
-  '<p class="hint">أرسلنا رمزًا من 6 أرقام إلى البريد الذي أدخلته إن كان صالحًا للتسجيل. صلاحيته 10 دقائق.</p>'+
+  '<p class="hint">إذا كان البريد جديدًا وطلبه قيد التحقق فستصلك رسالة برمز من 6 أرقام صالح لعشر دقائق. الحسابات المسجلة والطلبات المحسومة لا تحصل على رمز جديد.</p>'+
   '<p class="registration-address">'+safe(email)+'</p>'+
   '<form id="registrationVerifyForm" class="form-stack">'+
   '<label class="form-field">رمز التحقق<input name="code" type="text" class="input registration-otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required dir="ltr"></label>'+
@@ -1034,6 +1034,10 @@ async function renderRegistrations(){
   '<div class="action-row"><button id="testRegistrationEmail" class="btn secondary">✉ اختبار إرسال البريد إلى بريدي</button><button id="reloadRegistrations" class="btn secondary">↻ تحديث الطلبات</button></div></div>'+
   '<div class="registration-stats">'+Object.entries(counts).map(([k,n])=>
    '<div class="stat"><span>'+registrationStatuses[k]+'</span><div class="metric">'+n+'</div></div>').join('')+'</div>'+
+  '<div class="panel"><form id="diagnoseRegistrationForm" class="form-stack">'+
+  '<h3>فحص حالة بريد طلب التسجيل</h3><p class="hint">للمدير فقط: معرفة ما إذا كان البريد مرتبطًا بحساب أو بطلب قائم، دون كشف أي رمز.</p>'+
+  '<div class="action-row"><input class="input" name="email" type="email" maxlength="200" placeholder="البريد المستخدم في التسجيل" required style="flex:1;min-width:180px">'+
+  '<button class="btn secondary" type="submit">فحص البريد</button></div></form><div id="registrationDiagnosis" class="hint" aria-live="polite"></div></div>'+
   '<div class="panel"><div class="filters"><label>الحالة <select id="registrationStatusFilter" class="input">'+
   '<option value="all">جميع الحالات</option>'+
   Object.entries(registrationStatuses).map(([key,label])=>'<option value="'+key+'" '+(state.registrationTab===key?'selected':'')+'>'+label+'</option>').join('')+
@@ -1108,6 +1112,24 @@ async function renderRegistrations(){
   if(!window.confirm('إرسال رسالة اختبار إلى بريد حسابك الحالي فقط؟'))return;
   const result=await api('/registrations/test-email',{method:'POST'});
   toast(result.message||'أُرسلت رسالة الاختبار');
+ });
+ $('diagnoseRegistrationForm').onsubmit=request(async e=>{
+  e.preventDefault();
+  const form=e.currentTarget;
+  const email=form.elements.email.value.trim();
+  const target=$('registrationDiagnosis');
+  const info=await api('/registrations/diagnose',{method:'POST',data:{email}});
+  const stateLabels={existing_account:'حساب موجود',registration_request:'طلب مسجل',not_found:'لا يوجد سجل'};
+  let infoLine='<b>'+safe(stateLabels[info.state]||info.state)+'</b> — '+safe(info.message);
+  if(info.state==='registration_request'){
+   const stateName=registrationStatuses[info.status]||info.status;
+   infoLine+='<p>حالة الطلب: '+safe(stateName)+' · آخر محاولة إرسال: '+fmt(info.last_sent_at)+
+     ' · انتهاء الرمز: '+fmt(info.otp_expires_at)+'</p>';
+  }
+  if(info.state==='existing_account'){
+   infoLine+='<p>الحساب '+(info.active?'نشط':'غير نشط')+'. استخدم بريدًا جديدًا لاختبار التسجيل.</p>';
+  }
+  target.innerHTML='<div class="note">'+infoLine+'</div>';
  });
  $('reloadRegistrations').onclick=request(()=>renderRegistrations());
  $('registrationStatusFilter').value=state.registrationTab;
