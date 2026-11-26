@@ -295,6 +295,29 @@ class VideoMeetingInvitation(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+
+class DirectCall(Base):
+    """Private, unscheduled voice/video call. Media is never stored in PostgreSQL."""
+    __tablename__ = 'direct_calls'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    initiator_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    room_name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    mode: Mapped[str] = mapped_column(String(12))
+    status: Mapped[str] = mapped_column(String(20), default='ringing')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+    answered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class DirectCallMember(Base):
+    __tablename__ = 'direct_call_members'
+    __table_args__ = (UniqueConstraint('call_id','user_id', name='uq_direct_call_member'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    call_id: Mapped[int] = mapped_column(ForeignKey('direct_calls.id'), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    status: Mapped[str] = mapped_column(String(20), default='invited')
+    invited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
 class LoginAttempt(Base):
     __tablename__ = 'login_attempts'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -2223,3 +2246,279 @@ def update_meeting_minutes(meeting_id:int,data:MeetingMinutesBody,
     audit(db,s.user_id,'meeting_minutes_updated',f'meeting={meeting.id};length={len(meeting.minutes_text)}')
     db.commit()
     return meeting_json(db,meeting,s.user)
+
+
+# ----------------------------------------------------------------------
+# Direct voice/video calls: ring -> explicit acceptance -> private LiveKit room.
+# This feature is independent from scheduled VideoMeeting records.
+# ----------------------------------------------------------------------
+DIRECT_CALL_RING_SECONDS = 90
+DIRECT_CALL_MAX_SECONDS = 3 * 60 * 60
+
+class DirectCallCreateBody(BaseModel):
+    invitee_ids: list[int] = Field(min_length=1, max_length=MEETING_MAX_ATTENDEES-1)
+    mode: str = Field(default='video')
+
+class DirectCallInviteBody(BaseModel):
+    invitee_ids: list[int] = Field(min_length=1, max_length=MEETING_MAX_ATTENDEES-1)
+
+def direct_call_state(call: DirectCall) -> str:
+    if call.status in ('ended','ending','declined'):
+        return call.status
+    created = call.created_at.replace(tzinfo=call.created_at.tzinfo or UTC)
+    if NOW() > created + timedelta(seconds=DIRECT_CALL_MAX_SECONDS):
+        return 'expired'
+    if call.status == 'ringing' and NOW() > created + timedelta(seconds=DIRECT_CALL_RING_SECONDS):
+        return 'missed'
+    return call.status
+
+def direct_member_waiting(member: DirectCallMember, call: DirectCall) -> bool:
+    if member.status != 'invited' or direct_call_state(call) not in ('ringing','active'):
+        return False
+    invited = member.invited_at.replace(tzinfo=member.invited_at.tzinfo or UTC)
+    return NOW() <= invited + timedelta(seconds=DIRECT_CALL_RING_SECONDS)
+
+def direct_call_access(db: Session, call_id: int, user_id: int):
+    call = db.get(DirectCall, call_id)
+    if call is None:
+        raise HTTPException(404, 'الاتصال غير موجود')
+    member = db.scalar(select(DirectCallMember).where(
+        DirectCallMember.call_id == call_id, DirectCallMember.user_id == user_id))
+    if member is None:
+        raise HTTPException(404, 'الاتصال غير موجود')
+    return call, member
+
+def direct_call_json(db: Session, call: DirectCall, member: DirectCallMember):
+    members = db.scalars(select(DirectCallMember).where(
+        DirectCallMember.call_id == call.id).order_by(DirectCallMember.id)).all()
+    participants = []
+    for x in members:
+        u = db.get(User, x.user_id)
+        participants.append({'id':x.user_id, 'name':u.full_name if u else 'حساب غير متاح',
+                             'status':x.status, 'active':bool(u and u.active)})
+    return {'id':call.id, 'mode':call.mode, 'status':direct_call_state(call),
+            'initiator_id':call.initiator_id, 'is_initiator':call.initiator_id==member.user_id,
+            'my_status':member.status, 'incoming':not call.initiator_id==member.user_id and
+            direct_member_waiting(member, call), 'created_at':iso(call.created_at),
+            'answered_at':iso(call.answered_at), 'ended_at':iso(call.ended_at),
+            'participants':participants}
+
+def direct_call_invitees(db: Session, actor: User, ids: list[int], existing: set[int]):
+    unique = set(ids)
+    if len(ids) != len(unique) or not unique or len(unique | existing) > MEETING_MAX_ATTENDEES:
+        raise HTTPException(422, 'قائمة المشاركين غير صالحة أو تجاوزت الحد المسموح')
+    if unique & existing:
+        raise HTTPException(409, 'أحد الموظفين مدعو بالفعل لهذا الاتصال')
+    people = [db.get(User, uid) for uid in sorted(unique)]
+    if any(u is None or not u.active or db.get(UserRemoval, u.id) or
+           not meeting_scope_permission(actor, u) for u in people):
+        raise HTTPException(403, 'لا تملك صلاحية دعوة أحد المستخدمين')
+    return sorted(unique)
+
+@app.get('/api/calls/contacts')
+def direct_call_contacts(db: Session=Depends(get_db), s=Depends(require_login)):
+    me = s.user
+    users = db.scalars(select(User).where(User.active.is_(True), User.id != me.id)
+                       .order_by(User.full_name)).all()
+    permitted = [u for u in users if not db.get(UserRemoval, u.id)
+                 and meeting_scope_permission(me, u)]
+    ids = [u.id for u in permitted]
+    online = set()
+    if ids:
+        online = set(db.scalars(select(AuthSession.user_id).where(
+            AuthSession.user_id.in_(ids), AuthSession.logout_at.is_(None),
+            AuthSession.expires_at > NOW(),
+            AuthSession.last_seen >= NOW() - timedelta(seconds=ONLINE_WINDOW_SECONDS))).all())
+    return [{**user_data(u), 'online':u.id in online} for u in permitted]
+
+@app.get('/api/calls')
+def list_direct_calls(db: Session=Depends(get_db), s=Depends(require_login)):
+    my_ids = select(DirectCallMember.call_id).where(DirectCallMember.user_id == s.user_id)
+    items = db.scalars(select(DirectCall).where(DirectCall.id.in_(my_ids))
+                       .order_by(DirectCall.created_at.desc(), DirectCall.id.desc())
+                       .limit(60)).all()
+    calls = []
+    incoming = []
+    for call in items:
+        member = db.scalar(select(DirectCallMember).where(
+            DirectCallMember.call_id == call.id, DirectCallMember.user_id == s.user_id))
+        item = direct_call_json(db, call, member)
+        calls.append(item)
+        if item['incoming']:
+            incoming.append(item)
+    return {'calls':calls, 'incoming':incoming, 'video_enabled':video_available(),
+            'max_participants':MEETING_MAX_ATTENDEES}
+
+@app.post('/api/calls', status_code=201)
+def start_direct_call(data: DirectCallCreateBody,
+                      db: Session=Depends(get_db), s=Depends(require_login)):
+    if not video_available():
+        raise HTTPException(503, 'خدمة الاتصال المباشر غير متاحة الآن')
+    if data.mode not in ('video','audio'):
+        raise HTTPException(422, 'نوع الاتصال غير صالح')
+    ids = direct_call_invitees(db, s.user, data.invitee_ids, {s.user_id})
+    recent = db.scalar(select(func.count(DirectCall.id)).where(
+        DirectCall.initiator_id == s.user_id,
+        DirectCall.created_at > NOW() - timedelta(minutes=10))) or 0
+    if recent >= 8:
+        raise HTTPException(429, 'تم تجاوز عدد محاولات الاتصال؛ حاول لاحقًا')
+    existing_calls = db.scalars(select(DirectCall).where(
+        DirectCall.initiator_id == s.user_id,
+        DirectCall.status.in_(('ringing','active','ending')),
+        DirectCall.created_at > NOW() - timedelta(seconds=DIRECT_CALL_MAX_SECONDS))).all()
+    if any(direct_call_state(c) in ('ringing','active','ending') for c in existing_calls):
+        raise HTTPException(409, 'لديك اتصال قائم؛ أنهِه قبل إنشاء اتصال جديد')
+    call = DirectCall(initiator_id=s.user_id, mode=data.mode,
+                      room_name='enjaz-direct-'+secrets.token_urlsafe(24),
+                      created_at=NOW())
+    db.add(call); db.flush()
+    db.add(DirectCallMember(call_id=call.id, user_id=s.user_id,
+                            status='accepted', invited_at=NOW(), accepted_at=NOW()))
+    for uid in ids:
+        db.add(DirectCallMember(call_id=call.id, user_id=uid,
+                                status='invited', invited_at=NOW()))
+    audit(db, s.user_id, 'direct_call_started',
+          f'call={call.id};mode={data.mode};invitees={len(ids)}')
+    db.commit()
+    mine = db.scalar(select(DirectCallMember).where(
+        DirectCallMember.call_id == call.id, DirectCallMember.user_id == s.user_id))
+    return direct_call_json(db,call,mine)
+
+@app.post('/api/calls/{call_id}/accept')
+def accept_direct_call(call_id: int, db: Session=Depends(get_db),
+                       s=Depends(require_login)):
+    call, member = direct_call_access(db,call_id,s.user_id)
+    call = db.execute(select(DirectCall).where(DirectCall.id==call_id)
+                      .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    member = db.execute(select(DirectCallMember).where(
+        DirectCallMember.call_id==call_id, DirectCallMember.user_id==s.user_id)
+        .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    if member.status == 'accepted' and direct_call_state(call) in ('ringing','active'):
+        return direct_call_json(db,call,member)
+    if not direct_member_waiting(member, call):
+        raise HTTPException(409, 'انتهت الدعوة أو تم الرد عليها بالفعل')
+    member.status = 'accepted'
+    member.accepted_at = NOW()
+    if call.status=='ringing':
+        call.status = 'active'
+        call.answered_at = NOW()
+    audit(db,s.user_id,'direct_call_accepted',f'call={call_id}')
+    db.commit()
+    return direct_call_json(db,call,member)
+
+@app.post('/api/calls/{call_id}/decline')
+def decline_direct_call(call_id: int,db:Session=Depends(get_db),
+                        s=Depends(require_login)):
+    call, member = direct_call_access(db,call_id,s.user_id)
+    if call.initiator_id==s.user_id:
+        raise HTTPException(403, 'استخدم إنهاء الاتصال لإلغائه')
+    call = db.execute(select(DirectCall).where(DirectCall.id==call_id)
+                      .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    member = db.execute(select(DirectCallMember).where(
+        DirectCallMember.call_id==call_id, DirectCallMember.user_id==s.user_id)
+        .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    if member.status=='declined':
+        return {'ok':True}
+    if not direct_member_waiting(member,call):
+        raise HTTPException(409,'انتهت الدعوة أو تم الرد عليها بالفعل')
+    member.status='declined'
+    if call.status=='ringing':
+        others = db.scalars(select(DirectCallMember).where(
+            DirectCallMember.call_id==call_id,
+            DirectCallMember.user_id!=call.initiator_id,
+            DirectCallMember.user_id!=s.user_id)).all()
+        if not any(x.status in ('invited','accepted') for x in others):
+            call.status='declined'
+            call.ended_at=NOW()
+    audit(db,s.user_id,'direct_call_declined',f'call={call_id}')
+    db.commit()
+    return {'ok':True}
+
+@app.post('/api/calls/{call_id}/invite')
+def invite_direct_call(call_id:int,data:DirectCallInviteBody,
+                       db:Session=Depends(get_db),s=Depends(require_login)):
+    call,member=direct_call_access(db,call_id,s.user_id)
+    if call.initiator_id!=s.user_id:
+        raise HTTPException(403,'دعوة مشاركين جدد متاحة لمنشئ الاتصال فقط')
+    call=db.execute(select(DirectCall).where(DirectCall.id==call_id)
+                    .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    if direct_call_state(call) not in ('ringing','active'):
+        raise HTTPException(409,'الاتصال لم يعد متاحًا لإضافة مشاركين')
+    prior=set(db.scalars(select(DirectCallMember.user_id).where(
+        DirectCallMember.call_id==call_id)).all())
+    ids=direct_call_invitees(db,s.user,data.invitee_ids,prior)
+    for uid in ids:
+        db.add(DirectCallMember(call_id=call_id,user_id=uid,
+                                status='invited',invited_at=NOW()))
+    audit(db,s.user_id,'direct_call_invited',f'call={call_id};added={len(ids)}')
+    db.commit()
+    return {'ok':True}
+
+@app.post('/api/calls/{call_id}/join')
+def join_direct_call(call_id: int,db:Session=Depends(get_db),
+                     s=Depends(require_login)):
+    call,member=direct_call_access(db,call_id,s.user_id)
+    call=db.execute(select(DirectCall).where(DirectCall.id==call_id)
+                    .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    if direct_call_state(call) not in ('ringing','active') or member.status!='accepted':
+        raise HTTPException(409,'الاتصال غير متاح للدخول أو لم يتم قبول الدعوة')
+    if not video_available():
+        raise HTTPException(503,'الاتصال المرئي والصوتي غير متاح مؤقتًا')
+    token=meeting_jwt(call.room_name,s.user)
+    audit(db,s.user_id,'direct_call_join_authorized',f'call={call_id}')
+    db.commit()
+    return {'server_url':LIVEKIT_URL,'token':token,'call_id':call.id,'mode':call.mode,
+            'sdk_url':VIDEO_SDK_CDN if MEETINGS_ALLOW_CDN_SDK else '/assets/livekit-client.umd.min.js'}
+
+@app.post('/api/calls/{call_id}/end')
+def end_direct_call(call_id: int,db:Session=Depends(get_db),
+                    s=Depends(require_login)):
+    call,member=direct_call_access(db,call_id,s.user_id)
+    if call.initiator_id!=s.user_id:
+        raise HTTPException(403,'إنهاء الاتصال للجميع متاح لمنشئ الاتصال فقط')
+    call=db.execute(select(DirectCall).where(DirectCall.id==call_id)
+                    .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    if call.status in ('ended','declined'):
+        return {'ok':True,'status':call.status}
+    if call.status not in ('ringing','active','ending'):
+        raise HTTPException(409,'حالة الاتصال غير صالحة للإغلاق')
+    call.status='ending'
+    db.commit()  # Immediately blocks future JWTs and late acceptances.
+    ids=db.scalars(select(DirectCallMember.user_id).where(
+        DirectCallMember.call_id==call.id)).all()
+    has_joined=bool(db.scalar(select(Audit.id).where(
+        Audit.action=='direct_call_join_authorized',
+        Audit.details==f'call={call.id}').limit(1)))
+    try:
+        if has_joined:
+            close_livekit_room(call.room_name,ids)
+    except Exception:
+        audit(db,s.user_id,'direct_call_close_retry_required',f'call={call.id}')
+        db.commit()
+        raise HTTPException(503,'تعذر إغلاق غرفة الاتصال بالكامل؛ مُنع الدخول الجديد. حاول إنهاء الاتصال مجددًا')
+    call=db.execute(select(DirectCall).where(DirectCall.id==call_id)
+                    .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    call.status='ended'
+    call.ended_at=NOW()
+    audit(db,s.user_id,'direct_call_ended',f'call={call.id}')
+    db.commit()
+    return {'ok':True,'status':'ended'}
+
+@app.post('/api/calls/{call_id}/leave')
+def leave_direct_call(call_id:int,db:Session=Depends(get_db),
+                      s=Depends(require_login)):
+    call,member=direct_call_access(db,call_id,s.user_id)
+    if call.initiator_id==s.user_id:
+        raise HTTPException(403,'منشئ الاتصال ينهي الاتصال للجميع بدل مغادرة الغرفة')
+    call=db.execute(select(DirectCall).where(DirectCall.id==call_id)
+                    .with_for_update().execution_options(populate_existing=True)).scalar_one()
+    if member.status=='left':
+        return {'ok':True}
+    if member.status!='accepted' or direct_call_state(call) not in ('ringing','active'):
+        raise HTTPException(409,'لا توجد مشاركة نشطة لإنهائها')
+    member.status='left'
+    audit(db,s.user_id,'direct_call_left',f'call={call.id}')
+    db.commit()
+    # The browser disconnects immediately. Previously issued short-lived JWT
+    # cannot be revoked reliably without a provider-specific room-admin call.
+    return {'ok':True}
