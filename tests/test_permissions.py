@@ -151,6 +151,43 @@ class PermissionManagementTests(unittest.TestCase):
         self.assertGreaterEqual(len(audit),3)
         self.assertTrue(any('reason=' in row.details for row in audit))
 
+    def test_chat_and_mail_send_are_enforced_by_backend(self):
+        self.save(self.employee,{'chat.send':'deny','mail.send':'deny'})
+        with self.assertRaises(HTTPException) as chat_err:
+            m.post_message(m.MessageCreate(channel='general',text='Private message'),
+                           db=self.db,s=self.as_user(self.employee))
+        self.assertEqual(chat_err.exception.status_code,403)
+        with self.assertRaises(HTTPException) as mail_err:
+            m.compose_internal_mail(
+                m.InternalMailCompose(recipient_id=self.friend.id,subject='Hello',
+                                      body='Message body'),
+                db=self.db,s=self.as_user(self.employee))
+        self.assertEqual(mail_err.exception.status_code,403)
+        self.assertTrue(m.permission_allowed(self.db,self.employee,'chat.read'))
+        self.assertTrue(m.permission_allowed(self.db,self.employee,'mail.read'))
+
+    def test_meeting_join_gate_does_not_override_invitation(self):
+        request=m.MeetingCreateBody(title='Invitation check',
+                start_at=m.NOW()+timedelta(minutes=10),
+                duration_minutes=30,invitee_ids=[self.employee.id])
+        meeting=m.create_meeting(request,db=self.db,s=self.as_user(self.director))
+        self.save(self.employee,{'meetings.join':'deny'})
+        with self.assertRaises(HTTPException) as denied:
+            m.join_meeting(meeting['id'],db=self.db,s=self.as_user(self.employee))
+        self.assertEqual(denied.exception.status_code,403)
+        with self.assertRaises(HTTPException) as not_member:
+            m.join_meeting(meeting['id'],db=self.db,s=self.as_user(self.outside))
+        self.assertEqual(not_member.exception.status_code,404)
+
+    def test_inbound_call_acceptance_can_be_restricted(self):
+        call=m.start_direct_call(
+            m.DirectCallCreateBody(invitee_ids=[self.employee.id],mode='audio'),
+            db=self.db,s=self.as_user(self.director))
+        self.save(self.employee,{'calls.accept':'deny'})
+        with self.assertRaises(HTTPException) as denied:
+            m.accept_direct_call(call['id'],db=self.db,s=self.as_user(self.employee))
+        self.assertEqual(denied.exception.status_code,403)
+
     def test_task_role_and_edit_scope_not_bypassed_by_overrides(self):
         self.save(self.head,{'users.edit':'allow'})
         self.assertTrue(m.permission_allowed(self.db,self.head,'users.edit'))
