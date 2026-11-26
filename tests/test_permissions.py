@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 from datetime import timedelta
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 _testdir=tempfile.TemporaryDirectory(prefix='enjaz-permissions-')
 os.environ['DATABASE_URL']='sqlite:///'+_testdir.name+'/unit.db'
@@ -130,7 +131,7 @@ class PermissionManagementTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.save(self.employee,{'calls.start.audio':'deny','audit.view':'allow'})
         self.assertTrue(m.permission_allowed(self.db,self.employee,'calls.start.audio'))
-        with self.assertRaises(HTTPException):
+        with self.assertRaises(ValidationError):
             self.save(self.employee,{'calls.start.audio':'deny'},reason='قصير')
         self.assertTrue(m.permission_allowed(self.db,self.employee,'calls.start.audio'))
 
