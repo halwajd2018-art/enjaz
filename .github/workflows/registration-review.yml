@@ -39,3 +39,11 @@ jobs:
           cp main.py __init__.py /tmp/enjaz-registration-check/app/
           cp index.html app.js style.css /tmp/enjaz-registration-check/app/static/
           PYTHONPATH=/tmp/enjaz-registration-check python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify staging HTTPS service without creating accounts
+        run: |
+          curl --fail --silent --show-error --retry 3 --retry-delay 2 --max-time 15 \
+            https://enjaz-production.up.railway.app/healthz \
+            | python -c "import json,sys; assert json.load(sys.stdin)['status']=='ok'"
+          curl --fail --silent --show-error --retry 3 --retry-delay 2 --max-time 15 \
+            https://enjaz-production.up.railway.app/api/registration/config \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert isinstance(d['registration_enabled'],bool); assert d['otp_minutes']==10"
