@@ -915,3 +915,197 @@ async function inviteMoreDirectParticipants(callId){
   closeModal();await pollDirectCalls();toast('أُرسلت الدعوات الجديدة');
  });
 }
+
+
+
+// Self-registration entry is disabled until SMTP/OTP are configured by admin.
+// No unauthenticated user can obtain a session before approval and activation.
+function activationTokenFromLocation(){
+ const raw=window.location.hash||'';
+ if(!raw.startsWith('#activate='))return null;
+ let token='';
+ try{token=decodeURIComponent(raw.slice('#activate='.length))}catch{}
+ // Don't leave the one-time token in URL/history, server logs or analytics.
+ history.replaceState(null,'',window.location.pathname+window.location.search);
+ return token&&token.length<=150?token:null;
+}
+async function loadRegistrationEntry(){
+ const info=await api('/registration/config');
+ if(!info.registration_enabled)return;
+ const wrapper=$('registrationStartEntry');
+ if(!wrapper||state.me)return;
+ wrapper.innerHTML='<div class="registration-entry"><p>ليس لديك حساب بعد؟</p>'+
+  '<button id="openRegistration" type="button" class="btn secondary full">طلب التسجيل في إنجاز</button></div>';
+ $('openRegistration').onclick=renderRegistrationStart;
+}
+function renderRegistrationStart(){
+ if(state.me)return;
+ root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
+  '<div class="logo-big">إنجاز</div><h1>طلب تسجيل جديد</h1>'+
+  '<p class="hint">التحقق من البريد خطوة أولى. لا يمكن الدخول حتى موافقة مدير المنصة وتصنيف الحساب.</p>'+
+  '<form id="selfRegistrationForm" class="form-stack">'+
+  '<label class="form-field">الاسم الكامل<input name="full_name" class="input" minlength="2" maxlength="160" required autocomplete="name"></label>'+
+  '<label class="form-field">البريد الإلكتروني<input name="email" class="input" type="email" maxlength="200" required autocomplete="email"></label>'+
+  '<div id="registrationError" class="error" role="alert"></div>'+
+  '<button class="btn full" type="submit">إرسال رمز التحقق</button></form>'+
+  '<button id="backToLogin" type="button" class="btn outline full">العودة لتسجيل الدخول</button></div></div>';
+ $('backToLogin').onclick=renderLogin;
+ $('selfRegistrationForm').onsubmit=async e=>{
+  e.preventDefault();
+  const form=e.currentTarget;
+  const name=form.elements.full_name.value.trim();
+  const email=form.elements.email.value.trim().toLowerCase();
+  const button=form.querySelector('[type="submit"]');button.disabled=true;
+  try{
+   await api('/registration/start',{method:'POST',data:{full_name:name,email}});
+   renderRegistrationVerify(email);
+  }catch(err){$('registrationError').textContent=err.message}
+  finally{button.disabled=false}
+ };
+}
+function renderRegistrationVerify(email){
+ if(state.me)return;
+ root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
+  '<div class="logo-big">✉</div><h1>تأكيد البريد الإلكتروني</h1>'+
+  '<p class="hint">أرسلنا رمزًا من 6 أرقام إلى البريد الذي أدخلته إن كان صالحًا للتسجيل. صلاحيته 10 دقائق.</p>'+
+  '<p class="registration-address">'+safe(email)+'</p>'+
+  '<form id="registrationVerifyForm" class="form-stack">'+
+  '<label class="form-field">رمز التحقق<input name="code" type="text" class="input registration-otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required dir="ltr"></label>'+
+  '<div id="registrationError" class="error" role="alert"></div>'+
+  '<button class="btn full" type="submit">تأكيد الرمز وإرسال الطلب للمدير</button></form>'+
+  '<button id="resendRegistration" type="button" class="btn secondary full">إعادة إرسال الرمز</button>'+
+  '<button id="backToLogin" type="button" class="btn outline full">العودة لتسجيل الدخول</button></div></div>';
+ $('backToLogin').onclick=renderLogin;
+ $('registrationVerifyForm').onsubmit=async e=>{
+  e.preventDefault();
+  const btn=e.currentTarget.querySelector('[type="submit"]');btn.disabled=true;
+  try{
+   await api('/registration/verify',{method:'POST',data:{email,code:e.currentTarget.elements.code.value}});
+   renderRegistrationSuccess();
+  }catch(err){$('registrationError').textContent=err.message}
+  finally{btn.disabled=false}
+ };
+ $('resendRegistration').onclick=request(async()=>{
+  await api('/registration/resend',{method:'POST',data:{email}});
+  toast('إذا كان طلبك متاحًا، أُعيد إرسال الرمز. تحقق من بريدك');
+ });
+}
+function renderRegistrationSuccess(){
+ root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
+  '<div class="logo-big">✓</div><h1>تم تأكيد البريد الإلكتروني</h1>'+
+  '<p class="note">طلب التسجيل بانتظار موافقة مدير المنصة وتحديد المستوى الإداري والقسم.</p>'+
+  '<p class="hint">ستصل إلى بريدك رسالة تفعيل عند الموافقة؛ التحقق من البريد لا يسمح بالدخول قبل الاعتماد.</p>'+
+  '<button id="backToLogin" class="btn full">العودة لتسجيل الدخول</button></div></div>';
+ $('backToLogin').onclick=renderLogin;
+}
+function renderActivationSetup(token){
+ root.innerHTML='<div class="login-shell"><div class="login-card registration-card">'+
+  '<div class="logo-big">🔒</div><h1>تفعيل حساب إنجاز</h1>'+
+  '<p class="hint">بعد موافقة مدير المنصة، عيّن كلمة مرور شخصية من 12 حرفًا على الأقل. رابط التفعيل يُستخدم مرة واحدة.</p>'+
+  '<form id="activationForm" class="form-stack">'+
+  '<label class="form-field">كلمة المرور<input name="password" type="password" class="input" minlength="12" maxlength="128" autocomplete="new-password" required></label>'+
+  '<label class="form-field">تأكيد كلمة المرور<input name="confirm" type="password" class="input" minlength="12" maxlength="128" autocomplete="new-password" required></label>'+
+  '<p class="error" id="activationError" role="alert"></p><button class="btn full" type="submit">تعيين كلمة المرور وتفعيل الحساب</button></form>'+
+  '<button id="backToLogin" type="button" class="btn outline full">العودة لتسجيل الدخول</button></div></div>';
+ $('backToLogin').onclick=renderLogin;
+ $('activationForm').onsubmit=async e=>{
+  e.preventDefault();
+  const form=e.currentTarget,pw=form.elements.password.value;
+  if(pw!==form.elements.confirm.value){$('activationError').textContent='كلمتا المرور غير متطابقتين';return}
+  const btn=form.querySelector('[type="submit"]');btn.disabled=true;
+  try{
+   await api('/registration/activate',{method:'POST',data:{token,password:pw}});
+   renderLogin();toast('تم تفعيل الحساب. سجّل الدخول ببريدك وكلمة المرور الجديدة');
+  }catch(err){$('activationError').textContent=err.message}
+  finally{btn.disabled=false}
+ };
+}
+const registrationStatuses={awaiting_approval:'بانتظار الموافقة',approved:'معتمد وينتظر تعيين كلمة المرور',active:'تم التفعيل',rejected:'مرفوض'};
+async function renderRegistrations(){
+ if(state.me?.role!=='director'){state.page='dashboard';renderDashboard();return}
+ const response=await api('/registrations');
+ state.registrationPending=response.pending||0;
+ if(state.page!=='registrations')return;
+ const items=response.items||[];
+ const counts=Object.fromEntries(Object.keys(registrationStatuses).map(k=>[k,items.filter(x=>x.status===k).length]));
+ const rolesOptions=[['employee','موظف'],['head','رئيس قسم'],['advisor','مستشار القطاع']];
+ renderShell('طلبات التسجيل الجديدة','<div class="page-head"><div><h2>طلبات التسجيل والتحقق من البريد</h2>'+
+  '<p>تظهر فقط الطلبات التي اجتازت رمز التحقق. لا يُنشأ حساب نشط قبل مراجعتك والموافقة.</p></div>'+
+  '<button id="reloadRegistrations" class="btn secondary">↻ تحديث الطلبات</button></div>'+
+  '<div class="registration-stats">'+Object.entries(counts).map(([k,n])=>
+   '<div class="stat"><span>'+registrationStatuses[k]+'</span><div class="metric">'+n+'</div></div>').join('')+'</div>'+
+  '<div class="panel"><div class="filters"><label>الحالة <select id="registrationStatusFilter" class="input">'+
+  '<option value="all">جميع الحالات</option>'+
+  Object.entries(registrationStatuses).map(([key,label])=>'<option value="'+key+'" '+(state.registrationTab===key?'selected':'')+'>'+label+'</option>').join('')+
+  '</select></label></div><div id="registrationList" class="registration-list"></div></div>'+
+  '<p class="footer-note">التحقق من البريد لا يثبت الهوية الوظيفية. راجع بيانات المتقدم قبل تعيينه رئيس قسم أو مستشار قطاع. لا يُسمح بالتسجيل الذاتي بمستوى مدير عام.</p>');
+ const draw=()=>{
+  const filtered=items.filter(x=>state.registrationTab==='all'||x.status===state.registrationTab);
+  $('registrationList').innerHTML=filtered.length?filtered.map(x=>{
+   const status=registrationStatuses[x.status]||x.status;
+   const control=x.status==='awaiting_approval'?
+    '<form class="registration-review-form" data-registration-form="'+x.id+'">'+
+    '<div class="registration-classification">'+
+    '<label class="form-field">المستوى الإداري<select name="role" class="input" data-register-role="'+x.id+'">'+
+      rolesOptions.map(([key,label])=>'<option value="'+key+'">'+label+'</option>').join('')+'</select></label>'+
+    '<label class="form-field" data-register-dept-field="'+x.id+'">القسم<select name="department_id" class="input">'+
+      state.departments.map(d=>'<option value="'+d.id+'">'+safe(d.name)+'</option>').join('')+'</select></label></div>'+
+    '<div class="action-row"><button type="submit" class="btn">الموافقة وإرسال التفعيل</button>'+
+    '<button type="button" class="btn danger" data-reject-registration="'+x.id+'">رفض الطلب</button></div></form>'
+    :x.status==='approved'?
+    '<p class="hint">المستوى: '+safe(roles[x.role]||x.role)+' · '+safe(x.department||'ارتباط مستقل')+
+    '</p><button class="btn secondary small" data-resend-activation="'+x.id+'">إعادة إرسال رابط التفعيل</button>'
+    :x.status==='rejected'?'<p class="hint">سبب الرفض: '+safe(x.rejection_reason||'—')+'</p>':
+    '<p class="hint">المستوى: '+safe(roles[x.role]||x.role)+' · '+safe(x.department||'ارتباط مستقل')+'</p>';
+   return '<article class="registration-request"><div class="registration-request-head"><div>'+
+    '<h3>'+safe(x.name)+'</h3><p>'+safe(x.email)+' · طلب بتاريخ '+fmt(x.created_at)+
+    ' · تأكيد البريد '+fmt(x.email_verified_at)+'</p></div><span class="pill '+(x.status==='active'?'done':'working')+'">'+status+'</span></div>'+control+'</article>';
+  }).join(''):'<p class="hint">لا توجد طلبات مطابقة للحالة المحددة.</p>';
+  $('registrationList').querySelectorAll('[data-registration-form]').forEach(form=>{
+   const id=Number(form.dataset.registrationForm),roleSelect=form.querySelector('[name="role"]');
+   const deptField=form.querySelector('[data-register-dept-field]');
+   const deptSelect=form.querySelector('[name="department_id"]');
+   const sync=()=>{
+    deptField.hidden=roleSelect.value==='advisor';
+    deptSelect.disabled=roleSelect.value==='advisor';
+    [...deptSelect.options].forEach(o=>{
+     o.disabled=roleSelect.value==='head'&&Number(o.value)===state.organization.general_department_id;
+    });
+    if(deptSelect.selectedOptions[0]?.disabled)deptSelect.selectedIndex=[...deptSelect.options].findIndex(o=>!o.disabled);
+   };
+   roleSelect.onchange=sync;sync();
+   form.onsubmit=request(async e=>{
+    e.preventDefault();const role=roleSelect.value;
+    const department_id=role==='advisor'?null:Number(deptSelect.value);
+    if(role!=='advisor'&&(!department_id||deptSelect.selectedOptions[0]?.disabled))throw Error('اختر قسمًا صالحًا للمستوى الإداري');
+    if(!window.confirm('اعتماد حساب '+items.find(x=>x.id===id)?.name+' بالمستوى المحدد وإرسال رابط تعيين كلمة المرور؟'))return;
+    const btn=form.querySelector('[type="submit"]');btn.disabled=true;
+    try{
+     await api('/registrations/'+id+'/approve',{method:'POST',data:{role,department_id}});
+     await renderRegistrations();toast('تمت الموافقة وإرسال رابط التفعيل إلى البريد');
+    }catch(err){await renderRegistrations().catch(()=>{});throw err}
+    finally{btn.disabled=false}
+   });
+  });
+  $('registrationList').querySelectorAll('[data-reject-registration]').forEach(b=>b.onclick=()=>{
+   const id=Number(b.dataset.rejectRegistration),person=items.find(x=>x.id===id);
+   modal('رفض طلب تسجيل '+(person?.name||''),'<form id="registrationRejectForm" class="form-stack">'+
+    '<label class="form-field">سبب رفض الطلب<textarea class="input" name="reason" rows="3" minlength="5" maxlength="500" required></textarea></label>'+
+    '<button type="submit" class="btn danger">تأكيد الرفض</button></form>');
+   $('registrationRejectForm').onsubmit=request(async e=>{
+    e.preventDefault();const reason=e.currentTarget.elements.reason.value.trim();
+    if(reason.length<5)throw Error('أدخل سبب رفض من خمسة أحرف على الأقل');
+    await api('/registrations/'+id+'/reject',{method:'POST',data:{reason}});
+    closeModal();await renderRegistrations();toast('تم رفض الطلب وتوثيق القرار');
+   });
+  });
+  $('registrationList').querySelectorAll('[data-resend-activation]').forEach(b=>b.onclick=request(async()=>{
+   await api('/registrations/'+b.dataset.resendActivation+'/resend-activation',{method:'POST'});
+   await renderRegistrations();toast('أُرسل رابط التفعيل الجديد');
+  }));
+ };
+ $('reloadRegistrations').onclick=request(()=>renderRegistrations());
+ $('registrationStatusFilter').value=state.registrationTab;
+ $('registrationStatusFilter').onchange=e=>{state.registrationTab=e.target.value;draw()};
+ draw();
+}
