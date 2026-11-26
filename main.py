@@ -824,8 +824,9 @@ def update_user_permissions(user_id:int,data:PermissionOverridesUpdate,
                                           decision=choice,changed_by=s.user_id))
         changed.append(f'{code}:{previous}->{choice}')
     if changed:
-        audit(db,s.user_id,'user_permissions_changed',
-              f'user={target.id};reason={reason};'+','.join(changed))
+        for change in changed:
+            audit(db,s.user_id,'user_permissions_changed',
+                  f'user={target.id};{change};reason={reason}')
         db.commit()
     return {'ok':True,'updated':len(changed),
             'user':user_data(target),
