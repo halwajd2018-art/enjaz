@@ -29,7 +29,7 @@ COPY --from=livekit-sdk /opt/livekit/package/dist/livekit-client.umd.js /app/app
 RUN python -m py_compile /app/app/main.py
 # All tests use a temporary SQLite DB and stub LiveKit; no production DB or keys.
 COPY tests /app/tests
-RUN python -m unittest discover -s tests -p 'test_direct_calls.py' -v \
+RUN python -m unittest discover -s tests -p 'test_*.py' -v \
     && rm -rf /app/tests
 
 USER enjaz
