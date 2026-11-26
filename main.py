@@ -681,9 +681,7 @@ def registration_base_url() -> str:
         return ''
     return value
 
-def registration_available() -> bool:
-    if os.getenv('REGISTRATION_ENABLED','').lower()!='true':
-        return False
+def registration_mail_ready() -> bool:
     secret=os.getenv('REGISTRATION_OTP_PEPPER','')
     host=os.getenv('SMTP_HOST','').strip()
     sender=os.getenv('SMTP_FROM','').strip()
@@ -697,6 +695,13 @@ def registration_available() -> bool:
     if bool(user)!=bool(password):
         return False
     return True
+
+def registration_available() -> bool:
+    return os.getenv('REGISTRATION_ENABLED','').lower()=='true' and registration_mail_ready()
+
+def require_registration_mail_ready():
+    if not registration_mail_ready():
+        raise HTTPException(503,'خدمة إرسال البريد الإلكتروني غير مهيأة')
 
 def require_registration_available():
     if not registration_available():
@@ -736,7 +741,7 @@ def reg_limit_email_sends(db:Session,request:Request,email:str):
 
 def send_registration_email(destination:str,subject:str,body:str):
     """SMTP TLS only. No external mail is attempted in tests without explicit mock."""
-    require_registration_available()
+    require_registration_mail_ready()
     msg=EmailMessage()
     msg['From']=os.getenv('SMTP_FROM','').strip()
     msg['To']=destination
@@ -805,6 +810,24 @@ def require_registration_director(s):
 @app.get('/api/registration/config')
 def registration_config():
     return {'registration_enabled':registration_available(),'otp_minutes':10}
+
+@app.post('/api/registrations/test-email')
+def test_registration_email(request:Request,db:Session=Depends(get_db),s=Depends(require_login)):
+    """Send a delivery test only to the signed-in director. Never unlock signup."""
+    require_registration_director(s)
+    require_registration_mail_ready()
+    reg_limit_email_sends(db,request,s.user.email)
+    db.commit()  # The rate-limit attempt remains even on provider failure.
+    try:
+        send_registration_email(s.user.email,'اختبار بريد منصة إنجاز',
+            'هذه رسالة اختبار لإرسال البريد من منصة إنجاز عبر Resend.\n'
+            'لا يتضمن هذا الاختبار أي رمز تحقق أو رابط تفعيل.\n'
+            'وصول الرسالة لا يفعّل التسجيل الذاتي للمستخدمين.')
+    except Exception:
+        raise HTTPException(503,'فشل إرسال رسالة الاختبار. تحقق من توثيق النطاق وإعدادات SMTP')
+    audit(db,s.user_id,'registration_email_test',f'delivery_test_to_user={s.user_id}')
+    db.commit()
+    return {'ok':True,'message':'أُرسلت رسالة الاختبار إلى بريد المدير المسجل؛ تحقق من وصولها'}
 
 @app.post('/api/registration/start')
 def register_start(data:RegistrationStartBody,request:Request,db:Session=Depends(get_db)):
