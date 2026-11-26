@@ -1,6 +1,6 @@
 'use strict';
 const root=document.getElementById('root');
-const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false};
+const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false};
 const $=id=>document.getElementById(id);
 const safe=s=>String(s===null||s===undefined?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=dt=>dt?new Date(dt).toLocaleString('ar-SA',{dateStyle:'short',timeStyle:'short',timeZone:'Asia/Riyadh'}):'—';
@@ -128,12 +128,12 @@ function openNotificationCenter(){
  }));
  document.querySelectorAll('[data-notice-chat]').forEach(btn=>btn.onclick=()=>{const ch=btn.dataset.noticeChat;closeModal();state.page='chat';state.channel=ch;render()});
 }
-function renderLogin(){stopBackground();document.getElementById('directIncoming')?.remove();state.directCalls=[];root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p></div></div>`;
+function renderLogin(){stopRoomChat();stopBackground();document.getElementById('directIncoming')?.remove();state.directCalls=[];root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p></div></div>`;
  $('loginForm').onsubmit=request(async e=>{e.preventDefault();let fd=new FormData(e.currentTarget);let btn=e.currentTarget.querySelector('button');btn.disabled=true;try{let response=await api('/auth/login',{method:'POST',data:{email:fd.get('email'),password:fd.get('password')}});state.me=response.user;state.csrf=response.csrf;state.page='dashboard';state.noticeInitialized=false;await loadAll();startBackground();render();if(state.me.must_change_password)changePasswordModal(true)}catch(error){$('loginError').textContent=error.message}finally{btn.disabled=false}});
 }
 function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['calls','📞','الاتصالات المباشرة'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director'))}
 function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}${id==='meetings'&&state.meetingUnread?`<b class="mail-badge" data-meeting-badge>${state.meetingUnread}</b>`:''}${id==='calls'&&state.directCalls.some(c=>c.incoming)?`<b class="mail-badge" data-call-badge>●</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
- document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال أولًا');return}if(state.videoRoom)leaveVideoMeeting();state.page=btn.dataset.page;state.selectedTask=null;render()});
+ document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال أولًا');return}if(state.videoRoom)leaveVideoMeeting();stopRoomChat();state.page=btn.dataset.page;state.selectedTask=null;render()});
  $('logoutBtn').onclick=request(async()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال قبل تسجيل الخروج');return}await leaveVideoMeeting();await api('/auth/logout',{method:'POST'});state.me=null;state.csrf=null;renderLogin()});
  $('changePwBtn').onclick=()=>changePasswordModal(false);$('changeEmailBtn').onclick=()=>changeEmailModal();$('notificationBell').onclick=()=>openNotificationCenter();
 }
@@ -165,7 +165,7 @@ function renderTasks(){const visible=state.tasks;
  const body=`${warning}<div class="page-head"><div><h2>مهام الإدارة</h2><p>التكليف ومتابعة المراحل ونسب الإنجاز والاعتمادات.</p></div>${state.me.role!=='employee'?'<button id="newTask" class="btn">＋ إضافة مهمة</button>':''}</div><div class="panel"><div class="filters"><select id="taskStatus" class="input"><option value="">جميع الحالات</option>${Object.entries(statuses).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select><input id="taskSearch" class="input" placeholder="بحث في المهام..." aria-label="بحث المهام"><span class="hint">${visible.length} مهمة في نطاق صلاحيتك</span></div><div id="taskList" class="grid2"></div></div>`;
  renderShell('إدارة المهام',body);const update=()=>{const needle=$('taskSearch').value.trim(),stat=$('taskStatus').value;const ts=visible.filter(t=>(!stat||t.status===stat)&&(!needle||t.title.includes(needle)||t.assignee.includes(needle)));$('taskList').innerHTML=ts.length?ts.map(miniTask).join(''):'<div class="empty">لا توجد مهام مطابقة</div>';attachTasks()};$('taskSearch').oninput=update;$('taskStatus').onchange=update;update();if($('newTask'))$('newTask').onclick=taskCreateModal;}
 function modal(title,html){closeModal();const cover=document.createElement('div');cover.className='modal-cover';cover.innerHTML=`<div class="modal" role="dialog" aria-modal="true" aria-label="${safe(title)}"><button type="button" class="modal-close" id="closeModal">إغلاق ×</button><h2>${safe(title)}</h2>${html}</div>`;document.body.appendChild(cover);$('closeModal').onclick=closeModal;cover.addEventListener('click',e=>{if(e.target===cover)closeModal()});return cover}
-const closeModal=()=>{document.querySelector('.modal-cover')?.remove();if(state.discussionTimer){clearInterval(state.discussionTimer);state.discussionTimer=null}};
+const closeModal=()=>{document.querySelector('.modal-cover')?.remove();if(state.roomChatArchive)stopRoomChat();if(state.discussionTimer){clearInterval(state.discussionTimer);state.discussionTimer=null}};
 function field(name,label,type='text',value='',props=''){return `<label class="form-field">${label}<input class="input" name="${name}" type="${type}" value="${safe(value)}" ${props}></label>`}
 function taskCreateModal(){state.taskRequestId=(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID():('task_'+Date.now()+'_'+Math.random().toString(36).slice(2));const ds=state.departments.filter(d=>isExecutive(state.me.role)||state.me.department_id===d.id);
  modal('إنشاء تكليف جديد',`<form id="newTaskForm" class="form-stack"><div class="form-grid">${field('title','عنوان المهمة','text','','required maxlength="250"')}<label class="form-field">القسم<select name="department_id" id="taskDept" class="input">${ds.map(d=>`<option value="${d.id}">${safe(d.name)}</option>`).join('')}</select></label><label class="form-field">الموظف المكلف<select name="assigned_to" id="taskOwner" class="input"></select></label>${field('due_date','موعد الإنجاز','date',new Date(Date.now()+3*86400000).toISOString().slice(0,10),'required')}<label class="form-field">الأولوية<select name="priority" class="input"><option value="medium">متوسطة</option><option value="high">عالية</option><option value="low">منخفضة</option></select></label>${field('output','المخرج المطلوب','text','','maxlength="300"')}<label class="form-field full">وصف المهمة<textarea name="description" class="input" maxlength="4000"></textarea></label></div><div class="attachment-box"><b>📎 مرفقات التكليف (اختياري)</b><p class="hint">يمكنك إرفاق ملفات التعليمات عند إنشاء المهمة، وسيتمكن الموظف من إضافة مستندات الإنجاز من داخل المهمة لاحقًا. حتى 6 ملفات، 8 ميجابايت للملف.</p><input id="newTaskAttachments" type="file" class="input" accept="${attachmentTypes}" multiple><p id="newTaskAttachmentNames" class="hint"></p></div><div class="section-label">مراحل الإنجاز (الأوزان يجب أن تساوي 100%)</div><div class="grid3">${[1,2,3].map((n)=>`<div>${field('step'+n,'المرحلة '+n,'text',n===1?'التحضير':n===2?'التنفيذ':'الرفع للمراجعة','required')}${field('weight'+n,'الوزن %','number',n===1?30:n===2?40:30,'min="1" max="100" required')}</div>`).join('')}</div><p id="taskFormErr" class="error"></p><div class="action-row"><button type="submit" class="btn">حفظ التكليف</button><button type="button" class="btn secondary" id="cancelTask">إلغاء</button></div></form>`);
@@ -534,7 +534,7 @@ async function refreshAct(){try{let p=getActFilter();await loadActivity(p);$('ac
 async function renderAudit(){renderShell('سجل الإجراءات',`<div class="page-head"><div><h2>سجل التدقيق</h2><p>أبرز عمليات إنشاء وتعديل المستخدمين والمهام والمراسلات.</p></div></div><div id="auditRows" class="panel">جارٍ التحميل...</div>`);try{const rows=await api('/audit');$('auditRows').innerHTML=`<div class="table-wrap"><table class="table"><thead><tr><th>التاريخ</th><th>معرف المنفّذ</th><th>الإجراء</th><th>التفاصيل</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${fmt(r.created_at)}</td><td>${r.actor_id||'—'}</td><td>${safe(r.action)}</td><td>${safe(r.details)}</td></tr>`).join('')}</tbody></table></div>`}catch(e){toast(e.message)}}
 function startBackground(){stopBackground();state.lastInteraction=Date.now();for(const ev of ['click','keydown','input','scroll'])document.addEventListener(ev,trackInteraction,{passive:true});const pulse=()=>{if(state.me){const active=!document.hidden&&Date.now()-state.lastInteraction<120000;api('/activity/pulse',{method:'POST',data:{active}}).catch(()=>{})}};pulse();state.heartbeatTimer=setInterval(pulse,25000);state.presenceTimer=setInterval(()=>{if(state.page==='dashboard'&&!document.hidden)refreshPresence().catch(()=>{})},30000);state.mailTimer=setInterval(()=>{if(!document.hidden)pollNotifications().catch(()=>{})},20000);state.directCallTimer=setInterval(()=>pollDirectCalls().catch(()=>{}),4500);pollNotifications(true).catch(()=>{});pollDirectCalls().catch(()=>{})}
 function trackInteraction(){state.lastInteraction=Date.now()}
-function stopBackground(){if(state.chatTimer)clearInterval(state.chatTimer);if(state.heartbeatTimer)clearInterval(state.heartbeatTimer);if(state.presenceTimer)clearInterval(state.presenceTimer);if(state.mailTimer)clearInterval(state.mailTimer);if(state.discussionTimer)clearInterval(state.discussionTimer);if(state.noticeTimer)clearInterval(state.noticeTimer);if(state.directCallTimer)clearInterval(state.directCallTimer);state.directCallTimer=null;state.chatTimer=state.heartbeatTimer=state.presenceTimer=state.mailTimer=state.discussionTimer=state.noticeTimer=null;for(const ev of ['click','keydown','input','scroll'])document.removeEventListener(ev,trackInteraction)}
+function stopBackground(){if(state.chatTimer)clearInterval(state.chatTimer);if(state.heartbeatTimer)clearInterval(state.heartbeatTimer);if(state.presenceTimer)clearInterval(state.presenceTimer);if(state.mailTimer)clearInterval(state.mailTimer);if(state.discussionTimer)clearInterval(state.discussionTimer);if(state.noticeTimer)clearInterval(state.noticeTimer);if(state.directCallTimer)clearInterval(state.directCallTimer);state.directCallTimer=null;stopRoomChat();state.chatTimer=state.heartbeatTimer=state.presenceTimer=state.mailTimer=state.discussionTimer=state.noticeTimer=null;for(const ev of ['click','keydown','input','scroll'])document.removeEventListener(ev,trackInteraction)}
 init();
 
 
@@ -546,10 +546,11 @@ async function renderMeetings(){
  const [data,config,contacts]=await Promise.all([api('/meetings'),api('/meetings/config'),api('/meetings/contacts')]);
  state.meetings=data.meetings;state.meetingConfig=config;state.meetingContacts=contacts;state.meetingUnread=0;
  await api('/meetings/seen',{method:'POST'});
- const rows=state.meetings.map(m=>`<article class="panel meeting-card"><div class="meeting-card-head"><div><h3>${safe(m.title)}</h3><p>${localMeetingDate(m.start_at)} · ${m.duration_minutes} دقيقة${m.task_id?' · مرتبطة بالتكليف #'+m.task_id:''}</p></div><span class="pill ${m.status==='scheduled'?'working':'done'}">${m.status==='scheduled'?'مجدول':m.status==='ending'?'جارٍ إغلاق الغرفة':'منتهٍ'}</span></div><p class="hint">${safe(m.description||'لا توجد ملاحظات إضافية')}</p><p class="meeting-members">المشاركون: ${m.participants.map(u=>safe(u.name)).join('، ')}</p>${m.minutes_text?`<div class="meeting-minutes-preview"><strong>محضر الاجتماع</strong><p>${safe(m.minutes_text)}</p></div>`:''}<div class="action-row">${m.is_organizer?`<button class="btn secondary" data-meeting-minutes="${m.id}">محضر الاجتماع</button>`:''}<button class="btn" data-join-meeting="${m.id}" ${m.status!=='scheduled'||!config.video_enabled?'disabled':''}>دخول الاجتماع</button>${m.is_organizer&&['scheduled','ending'].includes(m.status)?`<button class="btn outline" data-end-meeting="${m.id}">${m.status==='ending'?'إعادة محاولة إغلاق الغرفة':'إنهاء الاجتماع للجميع'}</button>`:''}</div></article>`).join('');
+ const rows=state.meetings.map(m=>`<article class="panel meeting-card"><div class="meeting-card-head"><div><h3>${safe(m.title)}</h3><p>${localMeetingDate(m.start_at)} · ${m.duration_minutes} دقيقة${m.task_id?' · مرتبطة بالتكليف #'+m.task_id:''}</p></div><span class="pill ${m.status==='scheduled'?'working':'done'}">${m.status==='scheduled'?'مجدول':m.status==='ending'?'جارٍ إغلاق الغرفة':'منتهٍ'}</span></div><p class="hint">${safe(m.description||'لا توجد ملاحظات إضافية')}</p><p class="meeting-members">المشاركون: ${m.participants.map(u=>safe(u.name)).join('، ')}</p>${m.minutes_text?`<div class="meeting-minutes-preview"><strong>محضر الاجتماع</strong><p>${safe(m.minutes_text)}</p></div>`:''}<div class="action-row">${m.is_organizer?`<button class="btn secondary" data-meeting-minutes="${m.id}">محضر الاجتماع</button>`:''}<button class="btn secondary" data-meeting-chat="${m.id}">سجل الدردشة</button><button class="btn" data-join-meeting="${m.id}" ${m.status!=='scheduled'||!config.video_enabled?'disabled':''}>دخول الاجتماع</button>${m.is_organizer&&['scheduled','ending'].includes(m.status)?`<button class="btn outline" data-end-meeting="${m.id}">${m.status==='ending'?'إعادة محاولة إغلاق الغرفة':'إنهاء الاجتماع للجميع'}</button>`:''}</div></article>`).join('');
  renderShell('الاجتماعات المرئية',`<div class="page-head"><div><h2>الاجتماعات المرئية داخل إنجاز</h2><p>دعوات خاصة حسب صلاحيات الإدارة، واجتماعات صوت وصورة ومشاركة شاشة داخل المنصة.</p></div><button id="newVideoMeeting" class="btn">＋ اجتماع جديد</button></div>${!config.video_enabled?'<p class="meeting-setup-warning">ميزة بث الفيديو غير مفعّلة حتى اعتماد وإضافة إعدادات LiveKit الآمنة. يمكنك إعداد الاجتماعات والدعوات الآن.</p>':''}<div class="meeting-cards">${rows||'<section class="panel empty">لا توجد اجتماعات مدعوة لك حتى الآن.</section>'}</div><p class="footer-note">لا يتم تسجيل الصوت أو الصورة، ولا تُخزن الوسائط في قاعدة بيانات إنجاز. الوصول للغرف مقيد بالدعوات.</p>`);
  $('newVideoMeeting').onclick=()=>createVideoMeetingModal();
  document.querySelectorAll('[data-meeting-minutes]').forEach(b=>b.onclick=()=>editMeetingMinutes(Number(b.dataset.meetingMinutes)));
+ document.querySelectorAll('[data-meeting-chat]').forEach(b=>b.onclick=()=>openSessionChatArchive('meeting:'+Number(b.dataset.meetingChat),'الاجتماع'));
  document.querySelectorAll('[data-join-meeting]').forEach(b=>b.onclick=request(()=>joinVideoMeeting(Number(b.dataset.joinMeeting))));
  document.querySelectorAll('[data-end-meeting]').forEach(b=>b.onclick=request(async()=>{if(!confirm('إغلاق غرفة الفيديو وفصل جميع المشاركين وإبطال رموز الدخول السابقة؟'))return;await api(`/meetings/${b.dataset.endMeeting}/end`,{method:'POST'});await renderMeetings();toast('تم إنهاء الاجتماع')}));
 }
@@ -568,7 +569,8 @@ async function joinVideoMeeting(id){
  const access=await api(`/meetings/${id}/join`,{method:'POST'});
  const LK=await loadLiveKitSdk(access.sdk_url);const room=new LK.Room({adaptiveStream:true,dynacast:true});
  state.videoRoom=room;state.videoMeetingId=id;
- renderShell('اجتماع مرئي — '+meeting.title,`<div class="meeting-room"><div class="meeting-room-head"><div><b>${safe(meeting.title)}</b><p>محادثة مرئية خاصة · ${meeting.participants.length} مدعوين</p></div><span class="pill working" id="meetingConnection">جارٍ الاتصال…</span></div><div id="meetingVideoWall" class="meeting-video-wall"><div class="meeting-tile" data-participant-id="local"><div class="meeting-tile-placeholder">♙</div><small>أنت (${safe(state.me.name)})</small></div></div><div class="meeting-controls"><button class="btn secondary" id="meetingMic">🎤 تشغيل الميكروفون</button><button class="btn secondary" id="meetingCam">📷 تشغيل الكاميرا</button><button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button><button class="btn outline" id="meetingLeave">إنهاء مشاركتي</button>${meeting.is_organizer?'<button class="btn danger" id="meetingEndAll">إنهاء الاجتماع للجميع</button>':''}</div><p class="footer-note">يطلب المتصفح إذن الكاميرا والميكروفون. استخدم شاشة الاجتماعات مع المشاركين المدعوين فقط.</p></div>`);
+ renderShell('اجتماع مرئي — '+meeting.title,`<div class="session-room-layout"><div class="meeting-room"><div class="meeting-room-head"><div><b>${safe(meeting.title)}</b><p>محادثة مرئية خاصة · ${meeting.participants.length} مدعوين</p></div><span class="pill working" id="meetingConnection">جارٍ الاتصال…</span></div><div id="meetingVideoWall" class="meeting-video-wall"><div class="meeting-tile" data-participant-id="local"><div class="meeting-tile-placeholder">♙</div><small>أنت (${safe(state.me.name)})</small></div></div><div class="meeting-controls"><button class="btn secondary" id="meetingMic">🎤 تشغيل الميكروفون</button><button class="btn secondary" id="meetingCam">📷 تشغيل الكاميرا</button><button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button><button class="btn outline" id="meetingLeave">إنهاء مشاركتي</button>${meeting.is_organizer?'<button class="btn danger" id="meetingEndAll">إنهاء الاجتماع للجميع</button>':''}</div><p class="footer-note">يطلب المتصفح إذن الكاميرا والميكروفون. استخدم شاشة الاجتماعات مع المشاركين المدعوين فقط.</p></div>${roomChatHtml("meeting:"+id)}</div>`);
+ mountRoomChat("meeting:"+id);
  room.on(LK.RoomEvent.TrackSubscribed,(track,pub,participant)=>attachVideoTrack(track,participant.identity,participant.name||'مشارك'));
  room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(x=>x.remove()));
  room.on(LK.RoomEvent.ParticipantDisconnected,(participant)=>{document.querySelectorAll('[data-participant-id]').forEach(t=>{if(t.dataset.participantId===participant.identity)t.remove()})});
@@ -586,7 +588,7 @@ async function joinVideoMeeting(id){
  try{await room.connect(access.server_url,access.token);$('meetingConnection').textContent='متصل';room.remoteParticipants.forEach(p=>p.trackPublications.forEach(pub=>{if(pub.track)attachVideoTrack(pub.track,p.identity,p.name||'مشارك')}))}
  catch(e){await leaveVideoMeeting();await renderMeetings();throw Error('فشل الاتصال بالاجتماع: '+(e.message||'تحقق من إعدادات خدمة الفيديو والشبكة'))}
 }
-async function leaveVideoMeeting(){const room=state.videoRoom;state.videoRoom=null;state.videoMeetingId=null;if(room){try{room.disconnect()}catch{}}}
+async function leaveVideoMeeting(){stopRoomChat();const room=state.videoRoom;state.videoRoom=null;state.videoMeetingId=null;if(room){try{room.disconnect()}catch{}}}
 
 function editMeetingMinutes(meetingId){
  const m=state.meetings.find(x=>x.id===meetingId);if(!m||!m.is_organizer)return;
@@ -594,6 +596,88 @@ function editMeetingMinutes(meetingId){
  $('meetingMinutesForm').onsubmit=request(async e=>{e.preventDefault();await api('/meetings/'+meetingId+'/minutes',{method:'PATCH',data:{text:new FormData(e.currentTarget).get('minutes')}});closeModal();await renderMeetings();toast('تم حفظ محضر الاجتماع')});
 }
 
+
+
+// In-session collaboration: server persists text and verified attachments in existing
+// Message / SharedAttachment storage. The authenticated room membership is checked
+// again by the backend for every read, write and file download.
+function roomChatHtml(channel,readOnly=false){
+ return '<section class="panel room-chat-panel" aria-label="دردشة الجلسة">'+
+  '<div class="room-chat-title"><h3>💬 الدردشة والمرفقات</h3><small>'+(readOnly?'سجل محفوظ للقراءة':'متاحة للمشاركين فقط')+'</small></div>'+
+  '<div class="room-chat-messages" id="sessionChatMessages" role="log" aria-live="polite">'+
+  '<p class="hint">جارٍ تحميل المحادثة...</p></div>'+
+  (readOnly?'<p class="hint">يمكن الاطلاع على محادثة الجلسة المنتهية ومرفقاتها؛ لا يمكن إضافة رسائل جديدة.</p>':
+  '<form id="sessionChatForm" class="room-chat-compose">'+
+  '<textarea name="text" class="input" rows="2" maxlength="4000" placeholder="اكتب رسالة للمشاركين..."></textarea>'+
+  sharedPicker()+
+  '<div class="action-row"><button type="submit" class="btn">إرسال</button><span class="hint">3 مرفقات، حتى 5 ميجابايت لكل ملف</span></div></form>')+
+  '</section>';
+}
+function stopRoomChat(){
+ if(state.roomChatTimer)clearInterval(state.roomChatTimer);
+ state.roomChatTimer=null;state.roomChatChannel=null;state.roomChatLastId=0;
+ state.roomChatBusy=false;state.roomChatArchive=false;
+}
+function renderRoomChatMessage(m){
+ return '<article class="room-chat-message '+(m.sender_id===state.me?.id?'own':'')+'">'+
+  '<div class="room-chat-by"><b>'+safe(m.sender)+'</b><time>'+fmt(m.created_at)+'</time></div>'+
+  (m.text?'<p>'+safe(m.text)+'</p>':'')+
+  sharedAttachmentHtml(m.attachments||[],'chat')+'</article>';
+}
+async function pollRoomChat(channel){
+ if(channel!==state.roomChatChannel||state.roomChatBusy)return;
+ const target=$('sessionChatMessages');
+ if(!target)return;
+ state.roomChatBusy=true;
+ try{
+  const messages=await api('/messages?channel='+encodeURIComponent(channel)+'&after='+state.roomChatLastId);
+  if(channel!==state.roomChatChannel||!$('sessionChatMessages'))return;
+  const log=$('sessionChatMessages');
+  if(state.roomChatLastId===0)log.innerHTML='';
+  const nearBottom=log.scrollHeight-log.scrollTop-log.clientHeight<110;
+  if(messages.length){
+   log.insertAdjacentHTML('beforeend',messages.map(renderRoomChatMessage).join(''));
+   state.roomChatLastId=Math.max(state.roomChatLastId,...messages.map(m=>m.id));
+   if(nearBottom||messages.some(m=>m.sender_id===state.me.id))log.scrollTop=log.scrollHeight;
+  }
+  if(!log.children.length)log.innerHTML='<p class="hint">لا توجد رسائل بعد. ابدأ الكتابة أو أرسل ملفًا للمشاركين.</p>';
+  else if(log.firstElementChild?.classList.contains('hint')&&messages.length)log.firstElementChild.remove();
+ }catch(err){
+  const log=$('sessionChatMessages');
+  if(log&&!state.roomChatLastId)log.innerHTML='<p class="error">'+safe(err.message)+'</p>';
+ }finally{state.roomChatBusy=false}
+}
+function mountRoomChat(channel,readOnly=false){
+ stopRoomChat();
+ state.roomChatChannel=channel;state.roomChatArchive=readOnly;
+ const form=$('sessionChatForm');
+ if(form){
+  form.onsubmit=request(async e=>{
+   e.preventDefault();
+   const f=e.currentTarget;
+   const text=String(f.elements.text.value||'').trim(), files=validateSharedSelection(f);
+   if(!text&&!files.length)throw Error('اكتب رسالة أو اختر ملفًا');
+   const button=f.querySelector('[type="submit"]');
+   button.disabled=true;
+   try{
+    if(files.length){
+     const data=new FormData(f);
+     data.set('channel',channel);
+     data.set('text',text);
+     await sendSharedForm('/messages/upload',data);
+    }else await api('/messages',{method:'POST',data:{channel,text}});
+    f.reset();
+    await pollRoomChat(channel);
+   }finally{button.disabled=false}
+  });
+ }
+ pollRoomChat(channel).catch(()=>{});
+ state.roomChatTimer=setInterval(()=>{if(!document.hidden)pollRoomChat(channel).catch(()=>{})},3500);
+}
+function openSessionChatArchive(channel,title){
+ modal('سجل دردشة '+title,roomChatHtml(channel,true));
+ mountRoomChat(channel,true);
+}
 
 // Direct-call signaling is server-authorized. No public room links or persistent JWT storage.
 // Incoming calls are polled while Enjaz is open; the browser may restrict audible alerts.
@@ -706,6 +790,7 @@ function updateDirectCallHistory(){
  list.innerHTML=calls.length?calls.map(c=>{
   const names=c.participants.filter(p=>p.id!==state.me.id).map(p=>safe(p.name)).join('، ');
   const actions=[];
+  if(['accepted','left'].includes(c.my_status))actions.push('<button class="btn secondary small" data-direct-chat="'+c.id+'">الدردشة</button>');
   if(c.incoming)actions.push('<button class="btn small" data-direct-accept="'+c.id+'">قبول</button><button class="btn danger small" data-direct-decline="'+c.id+'">رفض</button>');
   if(['ringing','active'].includes(c.status)&&c.my_status==='accepted')actions.push('<button class="btn secondary small" data-direct-join="'+c.id+'">دخول الاتصال</button>');
   if(c.is_initiator&&['ringing','active','ending'].includes(c.status))actions.push('<button class="btn danger small" data-direct-end="'+c.id+'">'+(c.status==='ending'?'إعادة الإغلاق':'إنهاء للجميع')+'</button>');
@@ -713,6 +798,7 @@ function updateDirectCallHistory(){
    '<small>'+safe(fmt(c.created_at))+' · '+(names||'—')+' · '+c.participants.length+' مشاركين</small></div>'+
    '<div class="employee-actions">'+actions.join('')+'</div></div>';
  }).join(''):'<p class="hint">لا توجد اتصالات سابقة.</p>';
+ list.querySelectorAll('[data-direct-chat]').forEach(b=>b.onclick=()=>openSessionChatArchive('call:'+Number(b.dataset.directChat),'المكالمة'));
  list.querySelectorAll('[data-direct-accept]').forEach(b=>b.onclick=request(()=>acceptDirectCall(Number(b.dataset.directAccept))));
  list.querySelectorAll('[data-direct-decline]').forEach(b=>b.onclick=request(async()=>{await api('/calls/'+b.dataset.directDecline+'/decline',{method:'POST'});await pollDirectCalls()}));
  list.querySelectorAll('[data-direct-join]').forEach(b=>b.onclick=request(async()=>{const c=state.directCalls.find(x=>x.id===Number(b.dataset.directJoin));if(c)await connectDirectCall(c)}));
@@ -749,7 +835,7 @@ async function connectDirectCall(call){
  state.directRoom=room;state.directCallId=call.id;state.page='calls';
  document.getElementById('directIncoming')?.remove();
  renderShell('اتصال مباشر — '+(call.mode==='audio'?'صوتي':'مرئي'),
-  '<section class="panel"><div class="meeting-room-head"><div><h3>📞 الاتصال المباشر</h3>'+
+  '<div class="session-room-layout"><section class="panel"><div class="meeting-room-head"><div><h3>📞 الاتصال المباشر</h3>'+
   '<p>'+(call.mode==='audio'?'مكالمة صوتية':'مكالمة فيديو')+' · '+call.participants.length+' مدعوين</p></div>'+
   '<span class="pill working" id="meetingConnection">جارٍ الاتصال…</span></div>'+
   '<div id="meetingVideoWall" class="meeting-video-wall">'+
@@ -759,7 +845,8 @@ async function connectDirectCall(call){
   '<button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button>'+
   '<button class="btn outline" id="directInviteMore" '+(!call.is_initiator||call.participants.length>=16?'disabled':'')+'>＋ إضافة مشارك</button>'+
   '<button class="btn danger" id="directLeaveCall">'+(call.is_initiator?'إنهاء الاتصال للجميع':'مغادرة الاتصال')+'</button></div>'+
-  '<p class="hint">لا تحتاج المكالمة إلى موعد أو رابط عام. يُسمح بالانضمام للمستخدمين الذين قبلوا دعوتهم فقط.</p></section>');
+  '<p class="hint">لا تحتاج المكالمة إلى موعد أو رابط عام. يُسمح بالانضمام للمستخدمين الذين قبلوا دعوتهم فقط.</p></section>'+roomChatHtml('call:'+call.id)+'</div>');
+ mountRoomChat('call:'+call.id);
  room.on(LK.RoomEvent.TrackSubscribed,(track,pub,p)=>attachVideoTrack(track,p.identity,p.name||'مشارك'));
  room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
  room.on(LK.RoomEvent.ParticipantDisconnected,p=>document.querySelectorAll('[data-participant-id]').forEach(x=>{if(x.dataset.participantId===p.identity)x.remove()}));
@@ -794,7 +881,7 @@ async function connectDirectCall(call){
  }
 }
 async function disconnectDirectRoom(){
- const room=state.directRoom;state.directRoom=null;state.directCallId=null;
+ stopRoomChat();const room=state.directRoom;state.directRoom=null;state.directCallId=null;
  if(room){try{await room.disconnect()}catch{}}
 }
 async function inviteMoreDirectParticipants(callId){
