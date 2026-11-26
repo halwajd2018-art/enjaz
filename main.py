@@ -2484,14 +2484,15 @@ def end_direct_call(call_id: int,db:Session=Depends(get_db),
         raise HTTPException(409,'حالة الاتصال غير صالحة للإغلاق')
     call.status='ending'
     db.commit()  # Immediately blocks future JWTs and late acceptances.
-    ids=db.scalars(select(DirectCallMember.user_id).where(
-        DirectCallMember.call_id==call.id)).all()
-    has_joined=bool(db.scalar(select(Audit.id).where(
+    # Only recipients ever issued a JWT require revocation. Merely invited
+    # users have no LiveKit credential, and may never have joined a room.
+    issued_ids=set(db.scalars(select(Audit.actor_id).where(
         Audit.action=='direct_call_join_authorized',
-        Audit.details==f'call={call.id}').limit(1)))
+        Audit.details==f'call={call.id}')).all())
+    issued_ids.discard(None)
     try:
-        if has_joined:
-            close_livekit_room(call.room_name,ids)
+        if issued_ids:
+            close_livekit_room(call.room_name,sorted(issued_ids))
     except Exception:
         audit(db,s.user_id,'direct_call_close_retry_required',f'call={call.id}')
         db.commit()
