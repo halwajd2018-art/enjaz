@@ -239,6 +239,33 @@ class RegistrationSecurityTests(unittest.TestCase):
         self.assertIsNone(user.department_id)
         self.assertFalse(user.active)
 
+    def test_email_delivery_probe_is_director_only_and_cannot_open_registration(self):
+        self.assertFalse(m.registration_mail_ready())
+        self.assertEqual(len(self.sent),0)
+        with self.assertRaises(HTTPException) as forbidden:
+            m.test_registration_email(request=self.client,db=self.db,s=self.normal_user())
+        self.assertEqual(forbidden.exception.status_code,403)
+        with self.assertRaises(HTTPException) as unavailable:
+            m.test_registration_email(request=self.client,db=self.db,s=self.admin())
+        self.assertEqual(unavailable.exception.status_code,503)
+        with patch.object(m,'registration_mail_ready',return_value=True):
+            result=m.test_registration_email(request=self.client,db=self.db,s=self.admin())
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.sent[-1][0],self.director.email)
+        self.assertNotIn('otp',self.sent[-1][2].lower())
+        self.assertIsNone(self.db.scalar(m.select(m.RegistrationRequest.id).limit(1)))
+        self.assertEqual(m.reg_hmac('static'),m.reg_hmac('static'))
+
+    def test_email_delivery_probe_rate_limit(self):
+        with patch.object(m,'registration_mail_ready',return_value=True):
+            for _ in range(3):
+                self.assertTrue(m.test_registration_email(
+                    request=self.client,db=self.db,s=self.admin())['ok'])
+            with self.assertRaises(HTTPException) as limit:
+                m.test_registration_email(request=self.client,db=self.db,s=self.admin())
+            self.assertEqual(limit.exception.status_code,429)
+        self.assertEqual(len(self.sent),3)
+
     def test_mail_failure_leaves_account_inactive_for_resend(self):
         code=self.begin();self.verify(code)
         req=self.db.scalar(m.select(m.RegistrationRequest).where(
