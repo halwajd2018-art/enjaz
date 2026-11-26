@@ -1,3 +1,12 @@
+# Build-time-only LiveKit SDK acquisition; no npm or external CDN at browser runtime.
+# Keep this version aligned with VIDEO_SDK_CDN in main.py until CDN is disabled.
+FROM node:22-alpine AS livekit-sdk
+RUN set -eux; \
+    npm pack livekit-client@2.25.0 --ignore-scripts --pack-destination /tmp --silent; \
+    mkdir -p /opt/livekit; \
+    tar -xzf /tmp/livekit-client-2.25.0.tgz -C /opt/livekit \
+      package/dist/livekit-client.umd.min.js; \
+    test -s /opt/livekit/package/dist/livekit-client.umd.min.js
 
 FROM python:3.12-slim
 
@@ -14,6 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY main.py /app/app/main.py
 COPY __init__.py /app/app/__init__.py
 COPY index.html app.js style.css /app/app/static/
+COPY --from=livekit-sdk /opt/livekit/package/dist/livekit-client.umd.min.js /app/app/static/livekit-client.umd.min.js
 
 USER enjaz
 
