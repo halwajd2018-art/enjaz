@@ -367,6 +367,11 @@ class RegistrationSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPException) as denied:
                     m.require_login(bad_request,db=self.db)
                 self.assertEqual(denied.exception.status_code,expected)
+        with self.assertRaises(HTTPException) as forced_password_change:
+            m.require_login(request(token,csrf),db=self.db)
+        self.assertEqual(forced_password_change.exception.status_code,403)
+        self.director.must_change_password=False
+        self.db.commit()
         session=m.require_login(request(token,csrf),db=self.db)
         self.assertEqual(session.user.id,self.director.id)
         self.assertEqual(m.admin_registrations_count(db=self.db,s=session)['pending'],0)
