@@ -242,6 +242,63 @@ async function taskDiscussionModal(taskId){
 function renderChat(){const available=channels();if(!available.some(c=>c.id===state.channel))state.channel='general';const body=`<div class="page-head"><div><h2>التواصل المباشر بين الإدارة والموظفين</h2><p>محادثات دائمة مع تحديث دوري كل 8 ثوانٍ.</p></div><button id="chatRefresh" class="btn secondary">تحديث الرسائل</button></div><div class="chat-grid"><div class="panel channels">${available.map(c=>`<button data-channel="${safe(c.id)}" class="${state.channel===c.id?'selected':''}">${safe(c.name)}</button>`).join('')}</div><div class="panel"><h3 id="channelName">${safe(available.find(c=>c.id===state.channel).name)}</h3><div id="messageList" class="messages"></div><form id="messageForm" class="chat-compose shared-compose"><input class="input" name="text" autocomplete="off" maxlength="4000" placeholder="اكتب توجيهًا أو رسالة أو أرفق ملفًا...">${sharedPicker()}<button class="btn" type="submit">إرسال</button></form></div></div>`;renderShell('مركز المحادثات',body);document.querySelectorAll('[data-channel]').forEach(x=>x.onclick=()=>{state.channel=x.dataset.channel;renderChat()});$('chatRefresh').onclick=refreshMessages;
  $('messageForm').onsubmit=request(async e=>{e.preventDefault();const form=e.currentTarget;if(form.dataset.sending==='1')return;const text=form.elements.text.value.trim();const files=validateSharedSelection(form);if(!text&&!files.length)return;const b=form.querySelector('button[type="submit"]');b.disabled=true;form.dataset.sending='1';try{if(files.length){const data=new FormData(form);data.set('channel',state.channel);await sendSharedForm('/messages/upload',data)}else{await api('/messages',{method:'POST',data:{channel:state.channel,text}})}form.reset();await refreshMessages()}finally{b.disabled=false;form.dataset.sending='0'}});refreshMessages();if(state.chatTimer)clearInterval(state.chatTimer);state.chatTimer=setInterval(()=>{if(state.page==='chat')refreshMessages()},8000);
 }
+
+function renderOrganization(){
+  if(!state.me||state.me.role!=='director'){state.page='dashboard';return renderDashboard()}
+  const generalId=state.organization.general_department_id;
+  const departments=state.departments.map(d=>{
+    const count=state.users.filter(u=>u.department_id===d.id).length;
+    const kind=d.id===generalId?' · ارتباط الإدارة العامة (بدون رئيس قسم)':'';
+    return '<div class="employee-row"><div><b>'+safe(d.name)+'</b><small>المعرّف #'+d.id+' · '+count+' موظف مرتبط'+kind+'</small></div><div class="employee-actions"><button class="btn secondary small" data-org-dept="'+d.id+'">تعديل المسمى</button></div></div>';
+  }).join('');
+  const titlePairs=[['director','المدير العام'],['advisor','المستشار'],['head','رئيس القسم'],['employee','الموظف']];
+  const levels=titlePairs.map(([key,description])=>'<div class="employee-row"><div><b>'+safe(roles[key])+'</b><small>'+safe(description)+' · رمز الصلاحية '+key+'</small></div></div>').join('');
+  renderShell('إدارة المسميات التنظيمية',
+    '<div class="page-head"><div><h2>الأقسام والمستويات الإدارية</h2><p>تعديل المسميات المعروضة في المنصة لجميع الموظفين المرتبطين دون تغيير الصلاحيات أو نقل المهام.</p></div></div>'+
+    '<div class="note" style="margin-bottom:14px">التغيير يُحفظ في قاعدة البيانات ويظهر مباشرة في السجلات والتقارير الجديدة. الجلسات الأخرى تتحقق من تحديث المسميات تلقائيًا كل 20 ثانية تقريبًا. لا تتغير صلاحيات الحسابات عند تعديل اسم المستوى الإداري.</div>'+
+    '<section class="panel"><div class="page-head"><div><h3>مسميات الأقسام والوحدات</h3><p class="hint">يظل ارتباط الموظفين والتكليفات بالمعرّف الثابت نفسه.</p></div></div>'+departments+'</section>'+
+    '<section class="panel" style="margin-top:16px"><div class="page-head"><div><h3>مسميات المستويات الإدارية</h3><p class="hint">تغيير مسمى الدور للعرض فقط؛ لا يغيّر صلاحياته التقنية.</p></div><button class="btn" id="editRoleLabels">تعديل مسميات المستويات</button></div>'+levels+'</section>');
+  document.querySelectorAll('[data-org-dept]').forEach(btn=>btn.onclick=()=>renameDepartmentModal(state.departments.find(d=>d.id===Number(btn.dataset.orgDept))));
+  $('editRoleLabels').onclick=editRoleLabelsModal;
+}
+
+function renameDepartmentModal(dept){
+  if(!dept||state.me.role!=='director')return;
+  const n=state.users.filter(u=>u.department_id===dept.id).length;
+  modal('تغيير مسمى القسم',
+    '<form id="departmentRenameForm" class="form-stack">'+
+    '<div class="note">المسمى الحالي: <b>'+safe(dept.name)+'</b> · عدد الموظفين المرتبطين: <b>'+n+'</b>. سيُحدث الاسم في شاشات الموظفين والمهام والتقارير، دون حذف أو نقل أي موظف أو مهمة.</div>'+
+    '<label class="form-field">المسمى الجديد<input class="input" name="name" minlength="2" maxlength="160" required value="'+safe(dept.name)+'"></label>'+
+    '<div class="action-row"><button class="btn" type="submit">حفظ المسمى</button><button class="btn outline" type="button" id="cancelDepartmentRename">إلغاء</button></div></form>');
+  $('cancelDepartmentRename').onclick=closeModal;
+  $('departmentRenameForm').onsubmit=request(async e=>{
+    e.preventDefault();const form=e.currentTarget,name=String(new FormData(form).get('name')||'').trim();
+    if(name.length<2)throw Error('اكتب مسمى القسم الجديد');
+    if(name===dept.name){closeModal();return}
+    const button=form.querySelector('[type="submit"]');button.disabled=true;
+    try{await api('/departments/'+dept.id,{method:'PATCH',data:{name}});closeModal();await loadAll();renderOrganization();toast('تم تحديث المسمى لجميع الموظفين المرتبطين بالقسم')}
+    finally{button.disabled=false}
+  });
+}
+
+function editRoleLabelsModal(){
+  if(state.me.role!=='director')return;
+  const fields=[['director','المدير العام'],['advisor','المستشار'],['head','رئيس القسم'],['employee','الموظف']];
+  const inputs=fields.map(([key,label])=>'<label class="form-field">'+safe(label)+'<input class="input" name="'+key+'" minlength="2" maxlength="80" required value="'+safe(roles[key])+'"></label>').join('');
+  modal('تعديل مسميات المستويات الإدارية','<form id="roleLabelsForm" class="form-stack">'+
+    '<div class="note">تُحدّث هذه المسميات لجميع الحسابات التي تحمل المستوى الإداري ذاته. سيبقى رمز المستوى والصلاحيات كما هما، ولن تتغير المهام أو الاعتمادات.</div>'+
+    inputs+'<div class="action-row"><button class="btn" type="submit">حفظ مسميات المستويات</button><button class="btn outline" type="button" id="cancelRoleLabels">إلغاء</button></div></form>');
+  $('cancelRoleLabels').onclick=closeModal;
+  $('roleLabelsForm').onsubmit=request(async e=>{
+    e.preventDefault();const form=e.currentTarget,fd=new FormData(form),data={};
+    for(const [key] of fields){data[key]=String(fd.get(key)||'').trim();if(data[key].length<2)throw Error('جميع المسميات مطلوبة')}
+    if(new Set(Object.values(data)).size!==fields.length)throw Error('يجب أن يكون لكل مستوى مسمى مختلف');
+    const button=form.querySelector('[type="submit"]');button.disabled=true;
+    try{await api('/organization/role-labels',{method:'PATCH',data});closeModal();await loadAll();renderOrganization();toast('تم تحديث مسميات المستويات الإدارية لكافة المستخدمين')}
+    finally{button.disabled=false}
+  });
+}
+
 function renderEmployees(){
   const all=state.users;
   const director=state.me.role==='director';
