@@ -1,6 +1,6 @@
 'use strict';
 const root=document.getElementById('root');
-const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false};
+const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false};
 const $=id=>document.getElementById(id);
 const safe=s=>String(s===null||s===undefined?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=dt=>dt?new Date(dt).toLocaleString('ar-SA',{dateStyle:'short',timeStyle:'short',timeZone:'Asia/Riyadh'}):'—';
@@ -90,7 +90,7 @@ async function populateAttachments(taskId){
 function request(fn){return async(...rgs)=>{try{await fn(...rgs)}catch(e){toast(e.message||'حدث خطأ')}}}
 async function init(){try{const data=await api('/me');state.me=data.user;state.csrf=data.csrf;await loadAll();startBackground();render()}catch(e){renderLogin()}}
 async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices,organization]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications'),api('/organization')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:false,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}
-async function pollOrganization(){if(!state.me)return;const organization=await api('/organization');if(organization.revision!==state.organization.revision){const [users,departments,tasks,dashboard,presence]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:true});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}if(state.organizationRefreshPending&&!state.videoRoom&&!document.querySelector('.modal-cover')&&!document.hidden){state.organizationRefreshPending=false;render();}}
+async function pollOrganization(){if(!state.me)return;const organization=await api('/organization');if(organization.revision!==state.organization.revision){const [users,departments,tasks,dashboard,presence]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:true});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}if(state.organizationRefreshPending&&!state.videoRoom&&!state.directRoom&&!document.querySelector('.modal-cover')&&!document.hidden){state.organizationRefreshPending=false;render();}}
 const noticeKinds={assigned:'تكليف جديد',review:'مهمة مكتملة تنتظر المراجعة',completed:'تم اعتماد المهمة واكتمالها',revision:'أُعيدت المهمة للتعديل',cancelled:'تم إلغاء التكليف'};
 function syncNoticeBadges(){
  const bell=$('notificationCount');if(bell)bell.textContent=state.noticeCount||'';
@@ -128,17 +128,17 @@ function openNotificationCenter(){
  }));
  document.querySelectorAll('[data-notice-chat]').forEach(btn=>btn.onclick=()=>{const ch=btn.dataset.noticeChat;closeModal();state.page='chat';state.channel=ch;render()});
 }
-function renderLogin(){stopBackground();root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p></div></div>`;
+function renderLogin(){stopBackground();document.getElementById('directIncoming')?.remove();state.directCalls=[];root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p></div></div>`;
  $('loginForm').onsubmit=request(async e=>{e.preventDefault();let fd=new FormData(e.currentTarget);let btn=e.currentTarget.querySelector('button');btn.disabled=true;try{let response=await api('/auth/login',{method:'POST',data:{email:fd.get('email'),password:fd.get('password')}});state.me=response.user;state.csrf=response.csrf;state.page='dashboard';state.noticeInitialized=false;await loadAll();startBackground();render();if(state.me.must_change_password)changePasswordModal(true)}catch(error){$('loginError').textContent=error.message}finally{btn.disabled=false}});
 }
-function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director'))}
-function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}${id==='meetings'&&state.meetingUnread?`<b class="mail-badge" data-meeting-badge>${state.meetingUnread}</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
- document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{if(state.videoRoom)leaveVideoMeeting();state.page=btn.dataset.page;state.selectedTask=null;render()});
- $('logoutBtn').onclick=request(async()=>{await leaveVideoMeeting();await api('/auth/logout',{method:'POST'});state.me=null;state.csrf=null;renderLogin()});
+function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['calls','📞','الاتصالات المباشرة'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director'))}
+function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}${id==='meetings'&&state.meetingUnread?`<b class="mail-badge" data-meeting-badge>${state.meetingUnread}</b>`:''}${id==='calls'&&state.directCalls.some(c=>c.incoming)?`<b class="mail-badge" data-call-badge>●</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
+ document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال أولًا');return}if(state.videoRoom)leaveVideoMeeting();state.page=btn.dataset.page;state.selectedTask=null;render()});
+ $('logoutBtn').onclick=request(async()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال قبل تسجيل الخروج');return}await leaveVideoMeeting();await api('/auth/logout',{method:'POST'});state.me=null;state.csrf=null;renderLogin()});
  $('changePwBtn').onclick=()=>changePasswordModal(false);$('changeEmailBtn').onclick=()=>changeEmailModal();$('notificationBell').onclick=()=>openNotificationCenter();
 }
 function render(){if(!state.me)return renderLogin();if(state.page!=='chat'&&state.chatTimer){clearInterval(state.chatTimer);state.chatTimer=null}
- switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'audit':return renderAudit();default:return renderDashboard()}}
+ switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'calls':return renderDirectCalls();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'audit':return renderAudit();default:return renderDashboard()}}
 function cards(){const d=state.dashboard;return `<div class="cards">${[['إجمالي التكليفات',d.total||0,'مهمة مسجلة'],['المهام المكتملة',d.done||0,'معتمدة نهائيًا'],['المهام المتأخرة',d.late||0,'تحتاج متابعة'],['متوسط الإنجاز',(d.progress||0)+'%','متوسط الأوزان']].map(([title,val,sub])=>`<div class="stat"><span>${title}</span><div class="metric">${val}</div><small>${sub}</small></div>`).join('')}</div>`}
 function status(t){return `<span class="pill ${safe(t.status)}">${safe(statuses[t.status]||t.status)}</span>`}
 function miniTask(t){return `<div class="task-card">${t.assignee_removed&&t.status!=='done'?'<p class="error">⚠ الموظف محذوف — تتطلب إعادة إسناد</p>':''}<div class="detail-head"><div class="task-title">${safe(t.title)}</div>${status(t)}</div><div class="task-desc">${safe(t.assignee)} · ${safe(t.department)}</div><div class="task-meta"><span class="pill ${safe(t.priority)}">${safe(priorities[t.priority])}</span><span class="hint">الاستحقاق: ${fdate(t.due_date)}</span><b>${t.progress}%</b></div><div class="bar"><span style="width:${t.progress}%"></span></div><div class="action-row"><button class="btn secondary small" data-task="${t.id}">فتح المهمة</button></div></div>`}
@@ -313,6 +313,7 @@ function renderEmployees(){
     const canEdit=executive?u.role!=='director'&&(director||u.role!=='advisor'):
       state.me.role==='head'&&u.role==='employee'&&u.department_id===state.me.department_id;
     const buttons=[];
+    if(u.active&&u.id!==state.me.id)buttons.push(`<button class="btn secondary small" data-call-user="${u.id}" title="اتصال صوتي أو مرئي مباشر">📞 اتصال</button>`);
     if(executive&&u.role==='employee'){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="head" ${occupied||nonSection||!u.active?'disabled':''} title="${nonSection?'الإدارة العامة ارتباط تنظيمي وليست قسمًا له رئيس':occupied?'يجب تحويل رئيس القسم الحالي إلى موظف أولًا':!u.active?'يلزم تفعيل الحساب قبل الترقية':'تعيين رئيس قسم'}">تعيين رئيس قسم</button>`);
       if(director)buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="advisor" ${!u.active?'disabled':''}>تعيين مستشار القطاع</button>`);
@@ -330,6 +331,7 @@ function renderEmployees(){
   if($('newUser'))$('newUser').onclick=()=>userForm();
   if($('importUsers'))$('importUsers').onclick=()=>importEmployeesModal();
   document.querySelectorAll('[data-edit-user]').forEach(el=>el.onclick=()=>userForm(state.users.find(u=>u.id===Number(el.dataset.editUser))));
+  document.querySelectorAll('[data-call-user]').forEach(el=>el.onclick=request(()=>openDirectCallFromEmployee(Number(el.dataset.callUser))));
   document.querySelectorAll('[data-delete-user]').forEach(el=>el.onclick=request(()=>deleteEmployeeModal(state.users.find(u=>u.id===Number(el.dataset.deleteUser)))));
   document.querySelectorAll('[data-role-user]').forEach(el=>el.onclick=()=>changeRoleModal(state.users.find(u=>u.id===Number(el.dataset.roleUser)),el.dataset.targetRole));
 }
@@ -530,9 +532,9 @@ async function renderActivity(){renderShell('سجل الدخول والنشاط'
 function getActFilter(){return{user_id:$('activityUser')?.value||'',start:$('activityStart')?.value||'',end:$('activityEnd')?.value||''}}
 async function refreshAct(){try{let p=getActFilter();await loadActivity(p);$('activityResult').innerHTML=`${activitySummary(state.activity)}<section class="panel"><h3>السجل التاريخي</h3><div class="table-wrap"><table class="table"><thead><tr><th>الموظف</th><th>القسم</th><th>الدخول</th><th>آخر ظهور</th><th>الخروج</th><th>الاتصال</th><th>النشاط</th><th>الحالة</th></tr></thead><tbody>${state.activity.map(a=>`<tr><td>${safe(a.name)}</td><td>${safe(a.department)}</td><td>${fmt(a.login_at)}</td><td>${fmt(a.last_seen)}</td><td>${fmt(a.logout_at)}</td><td>${a.duration_minutes} د</td><td>${a.active_minutes} د</td><td><span class="pill ${a.status==='online'?'done':'offline'}"><span class="dot ${a.status==='online'?'':'offline'}"></span>${a.status==='online'?'أونلاين':'أوفلاين'}</span></td></tr>`).join('')||'<tr><td colspan="8">لا توجد سجلات مطابقة</td></tr>'}</tbody></table></div></section>`}catch(e){toast(e.message)}}
 async function renderAudit(){renderShell('سجل الإجراءات',`<div class="page-head"><div><h2>سجل التدقيق</h2><p>أبرز عمليات إنشاء وتعديل المستخدمين والمهام والمراسلات.</p></div></div><div id="auditRows" class="panel">جارٍ التحميل...</div>`);try{const rows=await api('/audit');$('auditRows').innerHTML=`<div class="table-wrap"><table class="table"><thead><tr><th>التاريخ</th><th>معرف المنفّذ</th><th>الإجراء</th><th>التفاصيل</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${fmt(r.created_at)}</td><td>${r.actor_id||'—'}</td><td>${safe(r.action)}</td><td>${safe(r.details)}</td></tr>`).join('')}</tbody></table></div>`}catch(e){toast(e.message)}}
-function startBackground(){stopBackground();state.lastInteraction=Date.now();for(const ev of ['click','keydown','input','scroll'])document.addEventListener(ev,trackInteraction,{passive:true});const pulse=()=>{if(state.me){const active=!document.hidden&&Date.now()-state.lastInteraction<120000;api('/activity/pulse',{method:'POST',data:{active}}).catch(()=>{})}};pulse();state.heartbeatTimer=setInterval(pulse,25000);state.presenceTimer=setInterval(()=>{if(state.page==='dashboard'&&!document.hidden)refreshPresence().catch(()=>{})},30000);state.mailTimer=setInterval(()=>{if(!document.hidden)pollNotifications().catch(()=>{})},20000);pollNotifications(true).catch(()=>{})}
+function startBackground(){stopBackground();state.lastInteraction=Date.now();for(const ev of ['click','keydown','input','scroll'])document.addEventListener(ev,trackInteraction,{passive:true});const pulse=()=>{if(state.me){const active=!document.hidden&&Date.now()-state.lastInteraction<120000;api('/activity/pulse',{method:'POST',data:{active}}).catch(()=>{})}};pulse();state.heartbeatTimer=setInterval(pulse,25000);state.presenceTimer=setInterval(()=>{if(state.page==='dashboard'&&!document.hidden)refreshPresence().catch(()=>{})},30000);state.mailTimer=setInterval(()=>{if(!document.hidden)pollNotifications().catch(()=>{})},20000);state.directCallTimer=setInterval(()=>pollDirectCalls().catch(()=>{}),4500);pollNotifications(true).catch(()=>{});pollDirectCalls().catch(()=>{})}
 function trackInteraction(){state.lastInteraction=Date.now()}
-function stopBackground(){if(state.chatTimer)clearInterval(state.chatTimer);if(state.heartbeatTimer)clearInterval(state.heartbeatTimer);if(state.presenceTimer)clearInterval(state.presenceTimer);if(state.mailTimer)clearInterval(state.mailTimer);if(state.discussionTimer)clearInterval(state.discussionTimer);if(state.noticeTimer)clearInterval(state.noticeTimer);state.chatTimer=state.heartbeatTimer=state.presenceTimer=state.mailTimer=state.discussionTimer=state.noticeTimer=null;for(const ev of ['click','keydown','input','scroll'])document.removeEventListener(ev,trackInteraction)}
+function stopBackground(){if(state.chatTimer)clearInterval(state.chatTimer);if(state.heartbeatTimer)clearInterval(state.heartbeatTimer);if(state.presenceTimer)clearInterval(state.presenceTimer);if(state.mailTimer)clearInterval(state.mailTimer);if(state.discussionTimer)clearInterval(state.discussionTimer);if(state.noticeTimer)clearInterval(state.noticeTimer);if(state.directCallTimer)clearInterval(state.directCallTimer);state.directCallTimer=null;state.chatTimer=state.heartbeatTimer=state.presenceTimer=state.mailTimer=state.discussionTimer=state.noticeTimer=null;for(const ev of ['click','keydown','input','scroll'])document.removeEventListener(ev,trackInteraction)}
 init();
 
 
@@ -590,4 +592,225 @@ function editMeetingMinutes(meetingId){
  const m=state.meetings.find(x=>x.id===meetingId);if(!m||!m.is_organizer)return;
  modal('محضر الاجتماع',`<form id="meetingMinutesForm" class="form-stack"><p class="hint">سجّل القرارات والتوصيات ومحاور المتابعة. لا يتم تسجيل الصوت أو الفيديو.</p><label class="form-field">المحضر<textarea name="minutes" class="input" maxlength="8000" rows="10">${safe(m.minutes_text||'')}</textarea></label><button class="btn">حفظ المحضر</button></form>`);
  $('meetingMinutesForm').onsubmit=request(async e=>{e.preventDefault();await api('/meetings/'+meetingId+'/minutes',{method:'PATCH',data:{text:new FormData(e.currentTarget).get('minutes')}});closeModal();await renderMeetings();toast('تم حفظ محضر الاجتماع')});
+}
+
+
+// Direct-call signaling is server-authorized. No public room links or persistent JWT storage.
+// Incoming calls are polled while Enjaz is open; the browser may restrict audible alerts.
+const directStatusLabels={ringing:'جارٍ الاتصال',active:'اتصال جارٍ',ending:'جارٍ الإغلاق',
+  ended:'منتهٍ',missed:'لم يُرد',declined:'مرفوض',expired:'انتهى الوقت'};
+let directAlertAudio=null;
+async function enableDirectCallAlerts(){
+ try{
+  const AudioApi=window.AudioContext||window.webkitAudioContext;
+  if(AudioApi){if(!directAlertAudio)directAlertAudio=new AudioApi();await directAlertAudio.resume()}
+ }catch{}
+ try{if(window.Notification&&Notification.permission==='default')await Notification.requestPermission()}catch{}
+ toast('تم إعداد التنبيهات المتاحة. يلزم إبقاء إنجاز مفتوحًا لاستقبال المكالمات');
+}
+function directRingTone(){
+ if(!directAlertAudio||directAlertAudio.state!=='running')return;
+ try{
+  const now=directAlertAudio.currentTime;
+  for(let i=0;i<3;i++){
+   const osc=directAlertAudio.createOscillator(), gain=directAlertAudio.createGain();
+   osc.type='sine';osc.frequency.value=i===1?740:880;
+   const start=now+i*0.24;
+   gain.gain.setValueAtTime(0.001,start);
+   gain.gain.exponentialRampToValueAtTime(0.08,start+0.02);
+   gain.gain.exponentialRampToValueAtTime(0.001,start+0.18);
+   osc.connect(gain);gain.connect(directAlertAudio.destination);
+   osc.start(start);osc.stop(start+0.19);
+  }
+ }catch{}
+}
+async function pollDirectCalls(){
+ if(!state.me||state.directCallBusy)return;
+ state.directCallBusy=true;
+ try{
+  const response=await api('/calls');
+  state.directCalls=response.calls||[];
+  showDirectIncoming((response.incoming||[])[0]);
+  const active=state.directCalls.find(c=>c.id===state.directCallId);
+  if(state.directRoom&&(!active||!['ringing','active'].includes(active.status))){
+   await disconnectDirectRoom();
+   if(state.page==='calls')await renderDirectCalls();
+   if(active)toast('انتهى الاتصال: '+(directStatusLabels[active.status]||active.status));
+  }else if(state.page==='calls'&&!state.directRoom){
+   updateDirectCallHistory();
+  }
+  document.querySelectorAll('[data-page="calls"]').forEach(btn=>{
+   btn.querySelector('[data-call-badge]')?.remove();
+   if(response.incoming?.length){const tag=document.createElement('b');tag.className='mail-badge';tag.dataset.callBadge='';tag.textContent=response.incoming.length;btn.appendChild(tag)}
+  });
+ }finally{state.directCallBusy=false}
+}
+function showDirectIncoming(call){
+ let box=document.getElementById('directIncoming');
+ if(!call||state.directRoom||!state.me){box?.remove();return}
+ if(!box){box=document.createElement('section');box.id='directIncoming';box.className='direct-incoming';box.setAttribute('role','alertdialog');box.setAttribute('aria-label','اتصال وارد');document.body.appendChild(box)}
+ const caller=call.participants.find(p=>p.id===call.initiator_id);
+ box.innerHTML='<div class="direct-incoming-title">📞 اتصال '+(call.mode==='audio'?'صوتي':'مرئي')+' وارد</div>'+
+  '<p><b>'+safe(caller?.name||'موظف')+'</b> يدعوك إلى اتصال مباشر'+(call.participants.length>2?' مع '+(call.participants.length-2)+' مشاركين آخرين':'')+'</p>'+
+  '<div class="action-row"><button class="btn" id="acceptDirectIncoming">قبول الاتصال</button>'+
+  '<button class="btn danger" id="declineDirectIncoming">رفض</button></div>';
+ $('acceptDirectIncoming').onclick=request(async()=>{if(state.videoRoom)throw Error('أنه مشاركتك في الاجتماع المجدول أولًا');await acceptDirectCall(call.id)});
+ $('declineDirectIncoming').onclick=request(async()=>{await api('/calls/'+call.id+'/decline',{method:'POST'});box.remove();await pollDirectCalls()});
+ if(state.lastIncomingCallId!==call.id){
+  state.lastIncomingCallId=call.id;
+  directRingTone();
+  if(navigator.vibrate)navigator.vibrate([180,90,180]);
+  try{if(window.Notification&&Notification.permission==='granted')new Notification('اتصال وارد عبر إنجاز',{body:caller?.name||'مستخدم إنجاز'})}catch{}
+ }
+}
+function directCallContactsMarkup(contacts,exclude=[]){
+ const excludeIds=new Set(exclude);
+ return contacts.filter(u=>!excludeIds.has(u.id)).map(u=>
+  '<label class="direct-contact"><input type="checkbox" name="call_invitee" value="'+u.id+'">'+
+  '<span><strong>'+safe(u.name)+'</strong><small>'+safe(affiliationLabel(u))+' · '+
+  (u.online?'🟢 متصل':'غير متصل')+'</small></span></label>').join('')||
+  '<p class="hint">لا يوجد موظفون آخرون يمكن دعوتهم.</p>';
+}
+async function renderDirectCalls(){
+ if(state.directRoom)return;
+ state.page='calls';
+ const [response,contacts]=await Promise.all([api('/calls'),api('/calls/contacts')]);
+ state.directCalls=response.calls||[];state.directContacts=contacts;
+ renderShell('الاتصالات الصوتية والمرئية',
+  '<div class="page-head"><div><h2>اتصال مباشر بدون موعد</h2><p>اتصل بموظف أو مجموعة فورًا؛ ستظهر لهم دعوة لقبول المكالمة أو رفضها.</p></div><button class="btn secondary" id="enableDirectAlerts">🔔 تفعيل رنين المكالمات</button></div>'+
+  '<section class="panel"><h3>بدء اتصال جديد</h3><form id="directStartForm" class="form-stack">'+
+  '<div class="direct-call-type"><label><input type="radio" name="mode" value="video" checked> 📹 مرئي</label>'+
+  '<label><input type="radio" name="mode" value="audio"> 🎙️ صوتي</label></div>'+
+  '<p class="hint">اختر من موظف واحد إلى 15 موظفًا؛ لا حاجة لإنشاء اجتماع مجدول.</p>'+
+  '<div class="direct-contacts">'+directCallContactsMarkup(contacts,[state.me.id])+'</div>'+
+  '<div class="action-row"><button class="btn" type="submit" '+(!response.video_enabled?'disabled':'')+'>بدء الاتصال الآن</button></div></form>'+
+  (!response.video_enabled?'<p class="error">خدمة الصوت والصورة غير متاحة من إعدادات النظام.</p>':'')+'</section>'+
+  '<section class="panel" style="margin-top:16px"><h3>الاتصالات الحالية والسجل الأخير</h3><div id="directCallHistory"></div></section>'+
+  '<p class="footer-note">يظهر تنبيه المكالمة الواردة أثناء فتح إنجاز في المتصفح، وليس كإشعار هاتف خارج التطبيق. لا يُسجَّل صوت أو فيديو المكالمات.</p>');
+ updateDirectCallHistory();
+ $('enableDirectAlerts').onclick=request(enableDirectCallAlerts);
+ $('directStartForm').onsubmit=request(async e=>{
+  e.preventDefault();const form=e.currentTarget;
+  const ids=Array.from(form.querySelectorAll('input[name="call_invitee"]:checked')).map(i=>Number(i.value));
+  if(!ids.length)throw Error('اختر موظفًا واحدًا على الأقل');
+  const mode=form.querySelector('input[name="mode"]:checked').value;
+  const button=form.querySelector('button[type="submit"]');button.disabled=true;
+  try{const call=await api('/calls',{method:'POST',data:{invitee_ids:ids,mode}});
+    state.directCalls.unshift(call);await connectDirectCall(call)}
+  finally{button.disabled=false}
+ });
+}
+function updateDirectCallHistory(){
+ const list=$('directCallHistory');if(!list||state.page!=='calls'||state.directRoom)return;
+ const calls=state.directCalls.slice(0,35);
+ list.innerHTML=calls.length?calls.map(c=>{
+  const names=c.participants.filter(p=>p.id!==state.me.id).map(p=>safe(p.name)).join('، ');
+  const actions=[];
+  if(c.incoming)actions.push('<button class="btn small" data-direct-accept="'+c.id+'">قبول</button><button class="btn danger small" data-direct-decline="'+c.id+'">رفض</button>');
+  if(['ringing','active'].includes(c.status)&&c.my_status==='accepted')actions.push('<button class="btn secondary small" data-direct-join="'+c.id+'">دخول الاتصال</button>');
+  if(c.is_initiator&&['ringing','active','ending'].includes(c.status))actions.push('<button class="btn danger small" data-direct-end="'+c.id+'">'+(c.status==='ending'?'إعادة الإغلاق':'إنهاء للجميع')+'</button>');
+  return '<div class="direct-history-row"><div><b>'+(c.mode==='audio'?'🎙️ اتصال صوتي':'📹 اتصال مرئي')+' · '+safe(directStatusLabels[c.status]||c.status)+'</b>'+
+   '<small>'+safe(fmt(c.created_at))+' · '+(names||'—')+' · '+c.participants.length+' مشاركين</small></div>'+
+   '<div class="employee-actions">'+actions.join('')+'</div></div>';
+ }).join(''):'<p class="hint">لا توجد اتصالات سابقة.</p>';
+ list.querySelectorAll('[data-direct-accept]').forEach(b=>b.onclick=request(()=>acceptDirectCall(Number(b.dataset.directAccept))));
+ list.querySelectorAll('[data-direct-decline]').forEach(b=>b.onclick=request(async()=>{await api('/calls/'+b.dataset.directDecline+'/decline',{method:'POST'});await pollDirectCalls()}));
+ list.querySelectorAll('[data-direct-join]').forEach(b=>b.onclick=request(async()=>{const c=state.directCalls.find(x=>x.id===Number(b.dataset.directJoin));if(c)await connectDirectCall(c)}));
+ list.querySelectorAll('[data-direct-end]').forEach(b=>b.onclick=request(async()=>{await api('/calls/'+b.dataset.directEnd+'/end',{method:'POST'});await pollDirectCalls()}));
+}
+async function openDirectCallFromEmployee(userId){
+ if(!state.me||state.videoRoom||state.directRoom)throw Error('أنه الاتصال الحالي أولًا');
+ const contacts=await api('/calls/contacts');
+ const user=contacts.find(u=>u.id===userId);
+ if(!user)throw Error('هذا الموظف غير متاح للاتصال');
+ modal('بدء اتصال مع '+user.name,
+  '<div class="note">سيظهر للموظف إشعار داخل منصة إنجاز للقبول أو الرفض.</div>'+
+  '<div class="action-row"><button id="quickVideoCall" class="btn">📹 اتصال مرئي</button>'+
+  '<button id="quickAudioCall" class="btn secondary">🎙️ اتصال صوتي</button></div>');
+ const start=(mode)=>request(async()=>{
+  const call=await api('/calls',{method:'POST',data:{invitee_ids:[userId],mode}});
+  closeModal();state.directCalls.unshift(call);await connectDirectCall(call);
+ });
+ $('quickVideoCall').onclick=start('video');$('quickAudioCall').onclick=start('audio');
+}
+async function acceptDirectCall(id){
+ if(state.directRoom||state.videoRoom)throw Error('أنه اتصالك الحالي أولًا');
+ const call=await api('/calls/'+id+'/accept',{method:'POST'});
+ document.getElementById('directIncoming')?.remove();
+ state.directCalls=state.directCalls.filter(c=>c.id!==id);
+ state.directCalls.unshift(call);
+ await connectDirectCall(call);
+}
+async function connectDirectCall(call){
+ if(state.directRoom||state.videoRoom)throw Error('لديك اتصال أو اجتماع مرئي قائم');
+ const access=await api('/calls/'+call.id+'/join',{method:'POST'});
+ const LK=await loadLiveKitSdk(access.sdk_url);
+ const room=new LK.Room({adaptiveStream:true,dynacast:true});
+ state.directRoom=room;state.directCallId=call.id;state.page='calls';
+ document.getElementById('directIncoming')?.remove();
+ renderShell('اتصال مباشر — '+(call.mode==='audio'?'صوتي':'مرئي'),
+  '<section class="panel"><div class="meeting-room-head"><div><h3>📞 الاتصال المباشر</h3>'+
+  '<p>'+(call.mode==='audio'?'مكالمة صوتية':'مكالمة فيديو')+' · '+call.participants.length+' مدعوين</p></div>'+
+  '<span class="pill working" id="meetingConnection">جارٍ الاتصال…</span></div>'+
+  '<div id="meetingVideoWall" class="meeting-video-wall">'+
+  '<div class="meeting-tile" data-participant-id="local"><div class="meeting-tile-placeholder">♙</div><small>أنت ('+safe(state.me.name)+')</small></div></div>'+
+  '<div class="meeting-controls"><button class="btn secondary" id="meetingMic">🎤 تشغيل الميكروفون</button>'+
+  '<button class="btn secondary" id="meetingCam">📷 تشغيل الكاميرا</button>'+
+  '<button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button>'+
+  '<button class="btn outline" id="directInviteMore" '+(!call.is_initiator||call.participants.length>=16?'disabled':'')+'>＋ إضافة مشارك</button>'+
+  '<button class="btn danger" id="directLeaveCall">'+(call.is_initiator?'إنهاء الاتصال للجميع':'مغادرة الاتصال')+'</button></div>'+
+  '<p class="hint">لا تحتاج المكالمة إلى موعد أو رابط عام. يُسمح بالانضمام للمستخدمين الذين قبلوا دعوتهم فقط.</p></section>');
+ room.on(LK.RoomEvent.TrackSubscribed,(track,pub,p)=>attachVideoTrack(track,p.identity,p.name||'مشارك'));
+ room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
+ room.on(LK.RoomEvent.ParticipantDisconnected,p=>document.querySelectorAll('[data-participant-id]').forEach(x=>{if(x.dataset.participantId===p.identity)x.remove()}));
+ room.on(LK.RoomEvent.LocalTrackPublished,pub=>{if(pub.track?.kind==='video'&&pub.track.source===LK.Track.Source.Camera){
+  const el=pub.track.attach();el.muted=true;el.autoplay=true;el.playsInline=true;el.className='meeting-track';
+  const tile=document.querySelector('[data-participant-id="local"]');
+  if(tile){tile.querySelector('video')?.remove();tile.prepend(el);tile.querySelector('.meeting-tile-placeholder')?.remove()}
+ }});
+ room.on(LK.RoomEvent.Disconnected,()=>{if(state.directRoom===room){state.directRoom=null;state.directCallId=null;if(state.me&&state.page==='calls')renderDirectCalls().catch(()=>{})}});
+ $('meetingMic').onclick=request(async()=>{const on=!room.localParticipant.isMicrophoneEnabled;await room.localParticipant.setMicrophoneEnabled(on);$('meetingMic').textContent=on?'🔇 كتم الميكروفون':'🎤 تشغيل الميكروفون'});
+ $('meetingCam').onclick=request(async()=>{const on=!room.localParticipant.isCameraEnabled;await room.localParticipant.setCameraEnabled(on);$('meetingCam').textContent=on?'📷 إيقاف الكاميرا':'📷 تشغيل الكاميرا'});
+ $('meetingScreen').onclick=request(async()=>{const on=!room.localParticipant.isScreenShareEnabled;await room.localParticipant.setScreenShareEnabled(on);$('meetingScreen').textContent=on?'إيقاف مشاركة الشاشة':'▣ مشاركة الشاشة'});
+ $('directInviteMore').onclick=request(()=>inviteMoreDirectParticipants(call.id));
+ $('directLeaveCall').onclick=request(async()=>{
+  if(call.is_initiator){if(!window.confirm('إنهاء المكالمة وفصل جميع المشاركين؟'))return;await api('/calls/'+call.id+'/end',{method:'POST'})}
+  else await api('/calls/'+call.id+'/leave',{method:'POST'});
+  await disconnectDirectRoom();await renderDirectCalls();
+ });
+ try{
+  await room.connect(access.server_url,access.token);
+  $('meetingConnection').textContent='متصل';
+  room.remoteParticipants.forEach(p=>p.trackPublications.forEach(pub=>{if(pub.track)attachVideoTrack(pub.track,p.identity,p.name||'مشارك')}));
+  try{
+   await room.localParticipant.setMicrophoneEnabled(true);
+   if($('meetingMic'))$('meetingMic').textContent='🔇 كتم الميكروفون';
+   if(call.mode==='video'){await room.localParticipant.setCameraEnabled(true);if($('meetingCam'))$('meetingCam').textContent='📷 إيقاف الكاميرا'}
+  }catch{toast('تم الاتصال. اسمح للمتصفح باستخدام الكاميرا والميكروفون أو فعّلهما يدويًا')}
+ }catch(e){
+  await disconnectDirectRoom();
+  await renderDirectCalls();
+  throw Error('فشل الاتصال: '+(e.message||'تأكد من الشبكة وإعدادات LiveKit'));
+ }
+}
+async function disconnectDirectRoom(){
+ const room=state.directRoom;state.directRoom=null;state.directCallId=null;
+ if(room){try{await room.disconnect()}catch{}}
+}
+async function inviteMoreDirectParticipants(callId){
+ const c=state.directCalls.find(x=>x.id===callId);
+ const contacts=await api('/calls/contacts');
+ const excluded=(c?.participants||[]).map(p=>p.id);
+ const available=contacts.filter(x=>!excluded.includes(x.id));
+ if(!available.length)throw Error('لا يوجد موظفون آخرون متاحون للدعوة');
+ modal('إضافة مشاركين للمكالمة','<form id="moreDirectInvite" class="form-stack"><p class="hint">يمكن إضافة المشاركين أثناء المكالمة، وتصل لهم دعوة قبول جديدة.</p>'+
+  '<div class="direct-contacts">'+directCallContactsMarkup(available,excluded)+'</div>'+
+  '<div class="action-row"><button class="btn" type="submit">إرسال الدعوات</button><button class="btn outline" id="cancelMoreDirect" type="button">إلغاء</button></div></form>');
+ $('cancelMoreDirect').onclick=closeModal;
+ $('moreDirectInvite').onsubmit=request(async e=>{
+  e.preventDefault();const ids=Array.from(e.currentTarget.querySelectorAll('input[name="call_invitee"]:checked')).map(i=>Number(i.value));
+  if(!ids.length)throw Error('اختر مشاركًا واحدًا على الأقل');
+  await api('/calls/'+callId+'/invite',{method:'POST',data:{invitee_ids:ids}});
+  closeModal();await pollDirectCalls();toast('أُرسلت الدعوات الجديدة');
+ });
 }
