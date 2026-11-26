@@ -599,7 +599,31 @@ function editMeetingMinutes(meetingId){
 // Incoming calls are polled while Enjaz is open; the browser may restrict audible alerts.
 const directStatusLabels={ringing:'جارٍ الاتصال',active:'اتصال جارٍ',ending:'جارٍ الإغلاق',
   ended:'منتهٍ',missed:'لم يُرد',declined:'مرفوض',expired:'انتهى الوقت'};
-let directPollCount=0;
+let directAlertAudio=null;
+async function enableDirectCallAlerts(){
+ try{
+  const AudioApi=window.AudioContext||window.webkitAudioContext;
+  if(AudioApi){if(!directAlertAudio)directAlertAudio=new AudioApi();await directAlertAudio.resume()}
+ }catch{}
+ try{if(window.Notification&&Notification.permission==='default')await Notification.requestPermission()}catch{}
+ toast('تم إعداد التنبيهات المتاحة. يلزم إبقاء إنجاز مفتوحًا لاستقبال المكالمات');
+}
+function directRingTone(){
+ if(!directAlertAudio||directAlertAudio.state!=='running')return;
+ try{
+  const now=directAlertAudio.currentTime;
+  for(let i=0;i<3;i++){
+   const osc=directAlertAudio.createOscillator(), gain=directAlertAudio.createGain();
+   osc.type='sine';osc.frequency.value=i===1?740:880;
+   const start=now+i*0.24;
+   gain.gain.setValueAtTime(0.001,start);
+   gain.gain.exponentialRampToValueAtTime(0.08,start+0.02);
+   gain.gain.exponentialRampToValueAtTime(0.001,start+0.18);
+   osc.connect(gain);gain.connect(directAlertAudio.destination);
+   osc.start(start);osc.stop(start+0.19);
+  }
+ }catch{}
+}
 async function pollDirectCalls(){
  if(!state.me||state.directCallBusy)return;
  state.directCallBusy=true;
@@ -634,6 +658,7 @@ function showDirectIncoming(call){
  $('declineDirectIncoming').onclick=request(async()=>{await api('/calls/'+call.id+'/decline',{method:'POST'});box.remove();await pollDirectCalls()});
  if(state.lastIncomingCallId!==call.id){
   state.lastIncomingCallId=call.id;
+  directRingTone();
   if(navigator.vibrate)navigator.vibrate([180,90,180]);
   try{if(window.Notification&&Notification.permission==='granted')new Notification('اتصال وارد عبر إنجاز',{body:caller?.name||'مستخدم إنجاز'})}catch{}
  }
@@ -652,7 +677,7 @@ async function renderDirectCalls(){
  const [response,contacts]=await Promise.all([api('/calls'),api('/calls/contacts')]);
  state.directCalls=response.calls||[];state.directContacts=contacts;
  renderShell('الاتصالات الصوتية والمرئية',
-  '<div class="page-head"><div><h2>اتصال مباشر بدون موعد</h2><p>اتصل بموظف أو مجموعة فورًا؛ ستظهر لهم دعوة لقبول المكالمة أو رفضها.</p></div></div>'+
+  '<div class="page-head"><div><h2>اتصال مباشر بدون موعد</h2><p>اتصل بموظف أو مجموعة فورًا؛ ستظهر لهم دعوة لقبول المكالمة أو رفضها.</p></div><button class="btn secondary" id="enableDirectAlerts">🔔 تفعيل رنين المكالمات</button></div>'+
   '<section class="panel"><h3>بدء اتصال جديد</h3><form id="directStartForm" class="form-stack">'+
   '<div class="direct-call-type"><label><input type="radio" name="mode" value="video" checked> 📹 مرئي</label>'+
   '<label><input type="radio" name="mode" value="audio"> 🎙️ صوتي</label></div>'+
@@ -663,6 +688,7 @@ async function renderDirectCalls(){
   '<section class="panel" style="margin-top:16px"><h3>الاتصالات الحالية والسجل الأخير</h3><div id="directCallHistory"></div></section>'+
   '<p class="footer-note">يظهر تنبيه المكالمة الواردة أثناء فتح إنجاز في المتصفح، وليس كإشعار هاتف خارج التطبيق. لا يُسجَّل صوت أو فيديو المكالمات.</p>');
  updateDirectCallHistory();
+ $('enableDirectAlerts').onclick=request(enableDirectCallAlerts);
  $('directStartForm').onsubmit=request(async e=>{
   e.preventDefault();const form=e.currentTarget;
   const ids=Array.from(form.querySelectorAll('input[name="call_invitee"]:checked')).map(i=>Number(i.value));
