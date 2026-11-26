@@ -293,6 +293,161 @@ class RegistrationSecurityTests(unittest.TestCase):
             self.assertEqual(limit.exception.status_code,429)
         self.assertEqual(len(self.sent),3)
 
+    def test_all_registration_admin_routes_reject_employee_head_and_advisor(self):
+        code=self.begin()
+        self.verify(code)
+        reg=self.db.scalar(m.select(m.RegistrationRequest).where(
+            m.RegistrationRequest.email=='new@example.invalid'))
+        extras=[]
+        for role in ('head','advisor'):
+            person=m.User(full_name=f'Unprivileged {role}',email=f'{role}@example.invalid',
+                password_hash=m.password_hasher.hash('StrongPass12345'),
+                role=role,active=True,
+                department_id=self.team.id if role=='head' else None)
+            self.db.add(person)
+            extras.append(person)
+        self.db.commit()
+        for person in (self.staff,*extras):
+            ses=SimpleNamespace(user=person,user_id=person.id)
+            actions={
+                'list':lambda: m.admin_registrations(db=self.db,s=ses),
+                'count':lambda: m.admin_registrations_count(db=self.db,s=ses),
+                'diagnose':lambda: m.diagnose_registration(
+                    m.RegistrationEmailBody(email='new@example.invalid'),
+                    db=self.db,s=ses),
+                'test-mail':lambda: m.test_registration_email(
+                    request=self.client,db=self.db,s=ses),
+                'approve':lambda: m.approve_registration(
+                    reg.id,m.RegistrationApprovalBody(role='employee',
+                      department_id=self.team.id),db=self.db,s=ses),
+                'reject':lambda: m.reject_registration(
+                    reg.id,m.RegistrationRejectionBody(reason='رفض مبرر إداري'),
+                    db=self.db,s=ses),
+                'resend-activation':lambda: m.resend_registration_activation(
+                    reg.id,db=self.db,s=ses),
+            }
+            for name,action in actions.items():
+                with self.subTest(role=person.role,endpoint=name):
+                    with self.assertRaises(HTTPException) as denied:
+                        action()
+                    self.assertEqual(denied.exception.status_code,403)
+        self.assertEqual(reg.status,'awaiting_approval')
+        self.assertIsNone(reg.user_id)
+
+    def test_director_permissions_require_cookie_and_csrf_token(self):
+        import hashlib
+        from starlette.requests import Request
+        token='b'*64
+        csrf='registration-integration-csrf-value'
+        self.db.add(m.AuthSession(
+            user_id=self.director.id,
+            secret_hash=hashlib.sha256(token.encode()).hexdigest(),
+            csrf=csrf,expires_at=m.NOW()+m.timedelta(minutes=15)))
+        self.db.commit()
+
+        def request(raw_token=None,csrf_token=None,method='POST'):
+            path='/api/registrations/diagnose'
+            headers=[]
+            if raw_token is not None:
+                headers.append((b'cookie',(m.COOKIE_NAME+'='+raw_token).encode()))
+            if csrf_token is not None:
+                headers.append((b'x-csrf-token',csrf_token.encode()))
+            return Request({'type':'http','method':method,'path':path,
+                            'raw_path':path.encode(),'headers':headers,
+                            'query_string':b'','client':('203.0.113.15',54321),
+                            'scheme':'https','server':('example.invalid',443)})
+
+        for bad_request,expected in (
+            (request(),401),
+            (request('a'*64,csrf),401),
+            (request(token),403),
+            (request(token,'invalid-token'),403),
+        ):
+            with self.subTest(expected=expected):
+                with self.assertRaises(HTTPException) as denied:
+                    m.require_login(bad_request,db=self.db)
+                self.assertEqual(denied.exception.status_code,expected)
+        session=m.require_login(request(token,csrf),db=self.db)
+        self.assertEqual(session.user.id,self.director.id)
+        self.assertEqual(m.admin_registrations_count(db=self.db,s=session)['pending'],0)
+
+    def test_newly_activated_employee_scope_and_task_authorization(self):
+        _,result=self.approved()
+        token=self.activation_token()
+        password='NewPrivatePassword2026!'
+        m.activate_registration(m.RegistrationActivationBody(token=token,
+                             password=password),db=self.db)
+        employee=self.db.get(m.User,result['user_id'])
+        self.assertEqual(employee.role,'employee')
+        self.assertEqual(employee.department_id,self.team.id)
+        self.assertEqual(m.login(m.LoginBody(email=employee.email,password=password),
+                                 response=Response(),db=self.db)['user']['role'],'employee')
+        ses=SimpleNamespace(user=employee,user_id=employee.id)
+        visible=m.users(db=self.db,s=ses)
+        self.assertEqual([x['id'] for x in visible],[employee.id])
+        assignment=m.TaskCreate(title='Security scope task',description='isolated',
+            department_id=self.team.id,assigned_to=self.staff.id,
+            due_date=m.date.today(),steps=[m.StepIn(title='Finish',weight=100)])
+        m.create_task(assignment,db=self.db,s=self.admin())
+        self.assertEqual(m.tasks(db=self.db,s=ses),[])
+        with self.assertRaises(HTTPException) as denied:
+            m.create_task(assignment,db=self.db,s=ses)
+        self.assertEqual(denied.exception.status_code,403)
+        with self.assertRaises(HTTPException) as denied:
+            m.admin_registrations(db=self.db,s=ses)
+        self.assertEqual(denied.exception.status_code,403)
+
+    def test_newly_activated_head_is_limited_to_his_department(self):
+        _,result=self.approved(role='head')
+        m.activate_registration(m.RegistrationActivationBody(
+            token=self.activation_token(),password='HeadPassword2026!'),db=self.db)
+        head=self.db.get(m.User,result['user_id'])
+        ses=SimpleNamespace(user=head,user_id=head.id)
+        other_team=m.Department(name='Another department')
+        self.db.add(other_team);self.db.flush()
+        outsider=m.User(full_name='Outside employee',email='outside@example.invalid',
+            role='employee',department_id=other_team.id,active=True,
+            password_hash=m.password_hasher.hash('StrongPass12345'))
+        self.db.add(outsider);self.db.commit()
+        own=m.TaskCreate(title='Within own department',department_id=self.team.id,
+            assigned_to=self.staff.id,due_date=m.date.today(),
+            steps=[m.StepIn(title='Complete own work',weight=100)])
+        outside=m.TaskCreate(title='Outside department work',department_id=other_team.id,
+            assigned_to=outsider.id,due_date=m.date.today(),
+            steps=[m.StepIn(title='Complete outside work',weight=100)])
+        m.create_task(outside,db=self.db,s=self.admin())
+        self.assertEqual(m.tasks(db=self.db,s=ses),[])
+        with self.assertRaises(HTTPException) as denied:
+            m.create_task(outside,db=self.db,s=ses)
+        self.assertEqual(denied.exception.status_code,403)
+        m.create_task(own,db=self.db,s=ses)
+        self.assertEqual(len(m.tasks(db=self.db,s=ses)),1)
+        self.assertNotIn(outsider.id,[u['id'] for u in m.users(db=self.db,s=ses)])
+        with self.assertRaises(HTTPException) as denied:
+            m.admin_registrations(db=self.db,s=ses)
+        self.assertEqual(denied.exception.status_code,403)
+
+    def test_new_advisor_cannot_grant_accounts_or_approve_registration(self):
+        code=self.begin();self.verify(code)
+        reg=self.db.scalar(m.select(m.RegistrationRequest).where(
+            m.RegistrationRequest.email=='new@example.invalid'))
+        result=m.approve_registration(reg.id,m.RegistrationApprovalBody(
+            role='advisor',department_id=None),db=self.db,s=self.admin())
+        m.activate_registration(m.RegistrationActivationBody(
+            token=self.activation_token(),password='AdvisorPassword2026!'),db=self.db)
+        advisor=self.db.get(m.User,result['user_id'])
+        self.assertIsNone(advisor.department_id)
+        ses=SimpleNamespace(user=advisor,user_id=advisor.id)
+        with self.assertRaises(HTTPException) as denied:
+            m.create_user(m.UserCreate(full_name='Unauthorized New',
+                email='newaccount@example.invalid',role='employee',
+                department_id=self.team.id,temporary_password='NewPassword12345'),
+                db=self.db,s=ses)
+        self.assertEqual(denied.exception.status_code,403)
+        with self.assertRaises(HTTPException) as denied:
+            m.admin_registrations(db=self.db,s=ses)
+        self.assertEqual(denied.exception.status_code,403)
+
     def test_mail_failure_leaves_account_inactive_for_resend(self):
         code=self.begin();self.verify(code)
         req=self.db.scalar(m.select(m.RegistrationRequest).where(
