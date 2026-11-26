@@ -963,7 +963,13 @@ def parse_bulk_sheet(content: bytes, db: Session, default_department_id: Optiona
         departments = db.scalars(select(Department)).all()
         departments_by_id = {d.id:d for d in departments}
         departments_by_name = {d.name.strip():d for d in departments}
-        role_aliases = {**IMPORT_ROLE_ALIASES, **{name.casefold():role for role,name in organization_snapshot(db)['roles'].items()}}
+        # Imports must never accept the director role, even after a title rename.
+        # Legacy aliases take precedence to avoid changing an existing sheet's meaning.
+        customized_aliases = {name.casefold(): role
+                              for role, name in organization_snapshot(db)['roles'].items()
+                              if role in ('employee', 'head', 'advisor')
+                              and name.casefold() not in IMPORT_ROLE_ALIASES}
+        role_aliases = {**customized_aliases, **IMPORT_ROLE_ALIASES}
         default_dept = departments_by_id.get(default_department_id) if default_department_id else None
         if default_department_id is not None and default_dept is None:
             raise HTTPException(400, 'القسم الافتراضي المحدد غير موجود')
