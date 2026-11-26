@@ -546,10 +546,11 @@ async function renderMeetings(){
  const [data,config,contacts]=await Promise.all([api('/meetings'),api('/meetings/config'),api('/meetings/contacts')]);
  state.meetings=data.meetings;state.meetingConfig=config;state.meetingContacts=contacts;state.meetingUnread=0;
  await api('/meetings/seen',{method:'POST'});
- const rows=state.meetings.map(m=>`<article class="panel meeting-card"><div class="meeting-card-head"><div><h3>${safe(m.title)}</h3><p>${localMeetingDate(m.start_at)} · ${m.duration_minutes} دقيقة${m.task_id?' · مرتبطة بالتكليف #'+m.task_id:''}</p></div><span class="pill ${m.status==='scheduled'?'working':'done'}">${m.status==='scheduled'?'مجدول':m.status==='ending'?'جارٍ إغلاق الغرفة':'منتهٍ'}</span></div><p class="hint">${safe(m.description||'لا توجد ملاحظات إضافية')}</p><p class="meeting-members">المشاركون: ${m.participants.map(u=>safe(u.name)).join('، ')}</p>${m.minutes_text?`<div class="meeting-minutes-preview"><strong>محضر الاجتماع</strong><p>${safe(m.minutes_text)}</p></div>`:''}<div class="action-row">${m.is_organizer?`<button class="btn secondary" data-meeting-minutes="${m.id}">محضر الاجتماع</button>`:''}<button class="btn" data-join-meeting="${m.id}" ${m.status!=='scheduled'||!config.video_enabled?'disabled':''}>دخول الاجتماع</button>${m.is_organizer&&['scheduled','ending'].includes(m.status)?`<button class="btn outline" data-end-meeting="${m.id}">${m.status==='ending'?'إعادة محاولة إغلاق الغرفة':'إنهاء الاجتماع للجميع'}</button>`:''}</div></article>`).join('');
+ const rows=state.meetings.map(m=>`<article class="panel meeting-card"><div class="meeting-card-head"><div><h3>${safe(m.title)}</h3><p>${localMeetingDate(m.start_at)} · ${m.duration_minutes} دقيقة${m.task_id?' · مرتبطة بالتكليف #'+m.task_id:''}</p></div><span class="pill ${m.status==='scheduled'?'working':'done'}">${m.status==='scheduled'?'مجدول':m.status==='ending'?'جارٍ إغلاق الغرفة':'منتهٍ'}</span></div><p class="hint">${safe(m.description||'لا توجد ملاحظات إضافية')}</p><p class="meeting-members">المشاركون: ${m.participants.map(u=>safe(u.name)).join('، ')}</p>${m.minutes_text?`<div class="meeting-minutes-preview"><strong>محضر الاجتماع</strong><p>${safe(m.minutes_text)}</p></div>`:''}<div class="action-row">${m.is_organizer?`<button class="btn secondary" data-meeting-minutes="${m.id}">محضر الاجتماع</button>`:''}<button class="btn secondary" data-meeting-chat="${m.id}">سجل الدردشة</button><button class="btn" data-join-meeting="${m.id}" ${m.status!=='scheduled'||!config.video_enabled?'disabled':''}>دخول الاجتماع</button>${m.is_organizer&&['scheduled','ending'].includes(m.status)?`<button class="btn outline" data-end-meeting="${m.id}">${m.status==='ending'?'إعادة محاولة إغلاق الغرفة':'إنهاء الاجتماع للجميع'}</button>`:''}</div></article>`).join('');
  renderShell('الاجتماعات المرئية',`<div class="page-head"><div><h2>الاجتماعات المرئية داخل إنجاز</h2><p>دعوات خاصة حسب صلاحيات الإدارة، واجتماعات صوت وصورة ومشاركة شاشة داخل المنصة.</p></div><button id="newVideoMeeting" class="btn">＋ اجتماع جديد</button></div>${!config.video_enabled?'<p class="meeting-setup-warning">ميزة بث الفيديو غير مفعّلة حتى اعتماد وإضافة إعدادات LiveKit الآمنة. يمكنك إعداد الاجتماعات والدعوات الآن.</p>':''}<div class="meeting-cards">${rows||'<section class="panel empty">لا توجد اجتماعات مدعوة لك حتى الآن.</section>'}</div><p class="footer-note">لا يتم تسجيل الصوت أو الصورة، ولا تُخزن الوسائط في قاعدة بيانات إنجاز. الوصول للغرف مقيد بالدعوات.</p>`);
  $('newVideoMeeting').onclick=()=>createVideoMeetingModal();
  document.querySelectorAll('[data-meeting-minutes]').forEach(b=>b.onclick=()=>editMeetingMinutes(Number(b.dataset.meetingMinutes)));
+ document.querySelectorAll('[data-meeting-chat]').forEach(b=>b.onclick=()=>openSessionChatArchive('meeting:'+Number(b.dataset.meetingChat),'الاجتماع'));
  document.querySelectorAll('[data-join-meeting]').forEach(b=>b.onclick=request(()=>joinVideoMeeting(Number(b.dataset.joinMeeting))));
  document.querySelectorAll('[data-end-meeting]').forEach(b=>b.onclick=request(async()=>{if(!confirm('إغلاق غرفة الفيديو وفصل جميع المشاركين وإبطال رموز الدخول السابقة؟'))return;await api(`/meetings/${b.dataset.endMeeting}/end`,{method:'POST'});await renderMeetings();toast('تم إنهاء الاجتماع')}));
 }
@@ -568,7 +569,8 @@ async function joinVideoMeeting(id){
  const access=await api(`/meetings/${id}/join`,{method:'POST'});
  const LK=await loadLiveKitSdk(access.sdk_url);const room=new LK.Room({adaptiveStream:true,dynacast:true});
  state.videoRoom=room;state.videoMeetingId=id;
- renderShell('اجتماع مرئي — '+meeting.title,`<div class="meeting-room"><div class="meeting-room-head"><div><b>${safe(meeting.title)}</b><p>محادثة مرئية خاصة · ${meeting.participants.length} مدعوين</p></div><span class="pill working" id="meetingConnection">جارٍ الاتصال…</span></div><div id="meetingVideoWall" class="meeting-video-wall"><div class="meeting-tile" data-participant-id="local"><div class="meeting-tile-placeholder">♙</div><small>أنت (${safe(state.me.name)})</small></div></div><div class="meeting-controls"><button class="btn secondary" id="meetingMic">🎤 تشغيل الميكروفون</button><button class="btn secondary" id="meetingCam">📷 تشغيل الكاميرا</button><button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button><button class="btn outline" id="meetingLeave">إنهاء مشاركتي</button>${meeting.is_organizer?'<button class="btn danger" id="meetingEndAll">إنهاء الاجتماع للجميع</button>':''}</div><p class="footer-note">يطلب المتصفح إذن الكاميرا والميكروفون. استخدم شاشة الاجتماعات مع المشاركين المدعوين فقط.</p></div>`);
+ renderShell('اجتماع مرئي — '+meeting.title,`<div class="session-room-layout"><div class="meeting-room"><div class="meeting-room-head"><div><b>${safe(meeting.title)}</b><p>محادثة مرئية خاصة · ${meeting.participants.length} مدعوين</p></div><span class="pill working" id="meetingConnection">جارٍ الاتصال…</span></div><div id="meetingVideoWall" class="meeting-video-wall"><div class="meeting-tile" data-participant-id="local"><div class="meeting-tile-placeholder">♙</div><small>أنت (${safe(state.me.name)})</small></div></div><div class="meeting-controls"><button class="btn secondary" id="meetingMic">🎤 تشغيل الميكروفون</button><button class="btn secondary" id="meetingCam">📷 تشغيل الكاميرا</button><button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button><button class="btn outline" id="meetingLeave">إنهاء مشاركتي</button>${meeting.is_organizer?'<button class="btn danger" id="meetingEndAll">إنهاء الاجتماع للجميع</button>':''}</div><p class="footer-note">يطلب المتصفح إذن الكاميرا والميكروفون. استخدم شاشة الاجتماعات مع المشاركين المدعوين فقط.</p></div>${roomChatHtml("meeting:"+id)}</div>`);
+ mountRoomChat("meeting:"+id);
  room.on(LK.RoomEvent.TrackSubscribed,(track,pub,participant)=>attachVideoTrack(track,participant.identity,participant.name||'مشارك'));
  room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(x=>x.remove()));
  room.on(LK.RoomEvent.ParticipantDisconnected,(participant)=>{document.querySelectorAll('[data-participant-id]').forEach(t=>{if(t.dataset.participantId===participant.identity)t.remove()})});
@@ -788,6 +790,7 @@ function updateDirectCallHistory(){
  list.innerHTML=calls.length?calls.map(c=>{
   const names=c.participants.filter(p=>p.id!==state.me.id).map(p=>safe(p.name)).join('، ');
   const actions=[];
+  if(['accepted','left'].includes(c.my_status))actions.push('<button class="btn secondary small" data-direct-chat="'+c.id+'">الدردشة</button>');
   if(c.incoming)actions.push('<button class="btn small" data-direct-accept="'+c.id+'">قبول</button><button class="btn danger small" data-direct-decline="'+c.id+'">رفض</button>');
   if(['ringing','active'].includes(c.status)&&c.my_status==='accepted')actions.push('<button class="btn secondary small" data-direct-join="'+c.id+'">دخول الاتصال</button>');
   if(c.is_initiator&&['ringing','active','ending'].includes(c.status))actions.push('<button class="btn danger small" data-direct-end="'+c.id+'">'+(c.status==='ending'?'إعادة الإغلاق':'إنهاء للجميع')+'</button>');
@@ -795,6 +798,7 @@ function updateDirectCallHistory(){
    '<small>'+safe(fmt(c.created_at))+' · '+(names||'—')+' · '+c.participants.length+' مشاركين</small></div>'+
    '<div class="employee-actions">'+actions.join('')+'</div></div>';
  }).join(''):'<p class="hint">لا توجد اتصالات سابقة.</p>';
+ list.querySelectorAll('[data-direct-chat]').forEach(b=>b.onclick=()=>openSessionChatArchive('call:'+Number(b.dataset.directChat),'المكالمة'));
  list.querySelectorAll('[data-direct-accept]').forEach(b=>b.onclick=request(()=>acceptDirectCall(Number(b.dataset.directAccept))));
  list.querySelectorAll('[data-direct-decline]').forEach(b=>b.onclick=request(async()=>{await api('/calls/'+b.dataset.directDecline+'/decline',{method:'POST'});await pollDirectCalls()}));
  list.querySelectorAll('[data-direct-join]').forEach(b=>b.onclick=request(async()=>{const c=state.directCalls.find(x=>x.id===Number(b.dataset.directJoin));if(c)await connectDirectCall(c)}));
@@ -831,7 +835,7 @@ async function connectDirectCall(call){
  state.directRoom=room;state.directCallId=call.id;state.page='calls';
  document.getElementById('directIncoming')?.remove();
  renderShell('اتصال مباشر — '+(call.mode==='audio'?'صوتي':'مرئي'),
-  '<section class="panel"><div class="meeting-room-head"><div><h3>📞 الاتصال المباشر</h3>'+
+  '<div class="session-room-layout"><section class="panel"><div class="meeting-room-head"><div><h3>📞 الاتصال المباشر</h3>'+
   '<p>'+(call.mode==='audio'?'مكالمة صوتية':'مكالمة فيديو')+' · '+call.participants.length+' مدعوين</p></div>'+
   '<span class="pill working" id="meetingConnection">جارٍ الاتصال…</span></div>'+
   '<div id="meetingVideoWall" class="meeting-video-wall">'+
@@ -841,7 +845,8 @@ async function connectDirectCall(call){
   '<button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button>'+
   '<button class="btn outline" id="directInviteMore" '+(!call.is_initiator||call.participants.length>=16?'disabled':'')+'>＋ إضافة مشارك</button>'+
   '<button class="btn danger" id="directLeaveCall">'+(call.is_initiator?'إنهاء الاتصال للجميع':'مغادرة الاتصال')+'</button></div>'+
-  '<p class="hint">لا تحتاج المكالمة إلى موعد أو رابط عام. يُسمح بالانضمام للمستخدمين الذين قبلوا دعوتهم فقط.</p></section>');
+  '<p class="hint">لا تحتاج المكالمة إلى موعد أو رابط عام. يُسمح بالانضمام للمستخدمين الذين قبلوا دعوتهم فقط.</p></section>'+roomChatHtml('call:'+call.id)+'</div>');
+ mountRoomChat('call:'+call.id);
  room.on(LK.RoomEvent.TrackSubscribed,(track,pub,p)=>attachVideoTrack(track,p.identity,p.name||'مشارك'));
  room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
  room.on(LK.RoomEvent.ParticipantDisconnected,p=>document.querySelectorAll('[data-participant-id]').forEach(x=>{if(x.dataset.participantId===p.identity)x.remove()}));
