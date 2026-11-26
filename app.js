@@ -1,13 +1,13 @@
 'use strict';
 const root=document.getElementById('root');
-const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null};
+const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false};
 const $=id=>document.getElementById(id);
 const safe=s=>String(s===null||s===undefined?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=dt=>dt?new Date(dt).toLocaleString('ar-SA',{dateStyle:'short',timeStyle:'short',timeZone:'Asia/Riyadh'}):'—';
 const fdate=dt=>dt?new Date(dt+'T12:00:00').toLocaleDateString('ar-SA'):'—';
 const roles={director:'مدير عام الإدارة',advisor:'مستشار القطاع',head:'رئيس قسم',employee:'موظف'};
 const isExecutive=role=>role==='director'||role==='advisor';
-const affiliationLabel=u=>u.role==='advisor'?'وظيفة مستقلة على مستوى القطاع':(u.department||'الإدارة العامة');
+const affiliationLabel=u=>u.role==='advisor'?roles.advisor+' — ارتباط مستقل':(u.department||state.organization.general_department_name||'الإدارة العامة');
 const statuses={new:'لم تبدأ',working:'قيد التنفيذ',review:'قيد المراجعة',revision:'بحاجة إلى تعديل',done:'معتمدة ومكتملة'};
 const priorities={high:'عالية',medium:'متوسطة',low:'منخفضة'};
 let toastTimer;
@@ -89,7 +89,8 @@ async function populateAttachments(taskId){
 }
 function request(fn){return async(...rgs)=>{try{await fn(...rgs)}catch(e){toast(e.message||'حدث خطأ')}}}
 async function init(){try{const data=await api('/me');state.me=data.user;state.csrf=data.csrf;await loadAll();startBackground();render()}catch(e){renderLogin()}}
-async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications')]);Object.assign(state,{users,departments,tasks,dashboard,presence,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});}
+async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices,organization]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications'),api('/organization')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:false,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}
+async function pollOrganization(){if(!state.me)return;const organization=await api('/organization');if(organization.revision!==state.organization.revision){const [users,departments,tasks,dashboard,presence]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:true});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}if(state.organizationRefreshPending&&!state.videoRoom&&!document.querySelector('.modal-cover')&&!document.hidden){state.organizationRefreshPending=false;render();}}
 const noticeKinds={assigned:'تكليف جديد',review:'مهمة مكتملة تنتظر المراجعة',completed:'تم اعتماد المهمة واكتمالها',revision:'أُعيدت المهمة للتعديل',cancelled:'تم إلغاء التكليف'};
 function syncNoticeBadges(){
  const bell=$('notificationCount');if(bell)bell.textContent=state.noticeCount||'';
@@ -106,6 +107,7 @@ async function pollNotifications(quiet=false){
  document.querySelectorAll('[data-page="meetings"]').forEach(btn=>{btn.querySelector('[data-meeting-badge]')?.remove();if(state.meetingUnread){const n=document.createElement('b');n.className='mail-badge';n.dataset.meetingBadge='';n.textContent=state.meetingUnread;btn.appendChild(n)}});
  if(!quiet&&state.noticeInitialized&&data.total_unread>old)toast('لديك إشعارات جديدة: رسالة أو محادثة أو تحديث مهمة');
  state.noticeInitialized=true;
+ pollOrganization().catch(()=>{});
 }
 function notificationCenterHtml(data){
  const ev=data.events||[];
@@ -129,14 +131,14 @@ function openNotificationCenter(){
 function renderLogin(){stopBackground();root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p></div></div>`;
  $('loginForm').onsubmit=request(async e=>{e.preventDefault();let fd=new FormData(e.currentTarget);let btn=e.currentTarget.querySelector('button');btn.disabled=true;try{let response=await api('/auth/login',{method:'POST',data:{email:fd.get('email'),password:fd.get('password')}});state.me=response.user;state.csrf=response.csrf;state.page='dashboard';state.noticeInitialized=false;await loadAll();startBackground();render();if(state.me.must_change_password)changePasswordModal(true)}catch(error){$('loginError').textContent=error.message}finally{btn.disabled=false}});
 }
-function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['audit','◈','سجل الإجراءات']].filter(x=>x[0]!=='audit'||isExecutive(state.me.role))}
+function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director'))}
 function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}${id==='meetings'&&state.meetingUnread?`<b class="mail-badge" data-meeting-badge>${state.meetingUnread}</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
  document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{if(state.videoRoom)leaveVideoMeeting();state.page=btn.dataset.page;state.selectedTask=null;render()});
  $('logoutBtn').onclick=request(async()=>{await leaveVideoMeeting();await api('/auth/logout',{method:'POST'});state.me=null;state.csrf=null;renderLogin()});
  $('changePwBtn').onclick=()=>changePasswordModal(false);$('changeEmailBtn').onclick=()=>changeEmailModal();$('notificationBell').onclick=()=>openNotificationCenter();
 }
 function render(){if(!state.me)return renderLogin();if(state.page!=='chat'&&state.chatTimer){clearInterval(state.chatTimer);state.chatTimer=null}
- switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'audit':return renderAudit();default:return renderDashboard()}}
+ switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'audit':return renderAudit();default:return renderDashboard()}}
 function cards(){const d=state.dashboard;return `<div class="cards">${[['إجمالي التكليفات',d.total||0,'مهمة مسجلة'],['المهام المكتملة',d.done||0,'معتمدة نهائيًا'],['المهام المتأخرة',d.late||0,'تحتاج متابعة'],['متوسط الإنجاز',(d.progress||0)+'%','متوسط الأوزان']].map(([title,val,sub])=>`<div class="stat"><span>${title}</span><div class="metric">${val}</div><small>${sub}</small></div>`).join('')}</div>`}
 function status(t){return `<span class="pill ${safe(t.status)}">${safe(statuses[t.status]||t.status)}</span>`}
 function miniTask(t){return `<div class="task-card">${t.assignee_removed&&t.status!=='done'?'<p class="error">⚠ الموظف محذوف — تتطلب إعادة إسناد</p>':''}<div class="detail-head"><div class="task-title">${safe(t.title)}</div>${status(t)}</div><div class="task-desc">${safe(t.assignee)} · ${safe(t.department)}</div><div class="task-meta"><span class="pill ${safe(t.priority)}">${safe(priorities[t.priority])}</span><span class="hint">الاستحقاق: ${fdate(t.due_date)}</span><b>${t.progress}%</b></div><div class="bar"><span style="width:${t.progress}%"></span></div><div class="action-row"><button class="btn secondary small" data-task="${t.id}">فتح المهمة</button></div></div>`}
@@ -250,7 +252,7 @@ function renderEmployees(){
   const rows=all.map(u=>{
     const currentHead=heads.get(u.department_id);
     const occupied=u.role==='employee'&&!!currentHead;
-    const nonSection=u.department==='الإدارة العامة';
+    const nonSection=u.department_id===state.organization.general_department_id;
     const canEdit=executive?u.role!=='director'&&(director||u.role!=='advisor'):
       state.me.role==='head'&&u.role==='employee'&&u.department_id===state.me.department_id;
     const buttons=[];
@@ -310,16 +312,16 @@ function changeRoleModal(user,newRole){
   if(user.role===newRole){toast('الدور الحالي مطابق للدور المطلوب');return}
   if(user.role==='head'&&newRole==='advisor'){toast('حوّل رئيس القسم إلى موظف أولًا');return}
   if(user.role==='advisor'&&newRole==='head'){toast('حوّل المستشار إلى موظف أولًا');return}
-  if(newRole==='head'&&user.department==='الإدارة العامة'){toast('لا يمكن تعيين رئيس قسم للإدارة العامة');return}
+  if(newRole==='head'&&user.department_id===state.organization.general_department_id){toast('لا يمكن تعيين رئيس قسم للإدارة العامة');return}
   const occupant=state.users.find(u=>u.role==='head'&&u.department_id===user.department_id&&u.id!==user.id);
   if(newRole==='head'&&occupant){toast('يجب تحويل رئيس القسم الحالي إلى موظف أولًا');return}
   if(['head','advisor'].includes(newRole)&&!user.active){toast('يجب تفعيل حساب الموظف أولًا');return}
   const returnsToDepartment = user.role==='advisor' && newRole==='employee';
-  const generalDepartment=state.departments.find(d=>d.name.trim()==='الإدارة العامة');
+  const generalDepartment=state.departments.find(d=>d.id===state.organization.general_department_id);
   // Put general management first and select it by default. Other departments
   // remain available and their explicit IDs must be forwarded unchanged.
   const orderedDepartments=[...state.departments].sort((a,b)=>
-    (a.name.trim()==='الإدارة العامة'?-1:b.name.trim()==='الإدارة العامة'?1:0));
+    (a.id===state.organization.general_department_id?-1:b.id===state.organization.general_department_id?1:0));
   const departmentsList=orderedDepartments.map(d=>`<option value="${d.id}" ${d.id===generalDepartment?.id?'selected':''}>${safe(d.name)}</option>`).join('');
   modal('تغيير صلاحية المستخدم',`<form id="roleChangeForm" class="form-stack"><div class="note">المستخدم: <b>${safe(user.name)}</b><br>الارتباط التنظيمي الحالي: <b>${safe(affiliationLabel(user))}</b><br>الدور الحالي: <b>${safe(roles[user.role]||user.role)}</b><br>الدور الجديد: <b>${safe(roles[newRole])}</b></div>${returnsToDepartment?`<label class="form-field">الارتباط التنظيمي بعد إلغاء دور المستشار<select id="advisorReturnDepartment" name="department_id" class="input" required>${departmentsList}</select><small class="hint">«الإدارة العامة» محددة افتراضيًا؛ ويمكنك اختيار أي قسم آخر. لن يتغير ارتباط الموظف بعد التأكيد إلا وفق اختيارك.</small></label>`:''}<p class="hint">سيتم إنهاء جميع جلسات المستخدم النشطة ويلزمه تسجيل الدخول من جديد. لا تتأثر المهام أو المراسلات السابقة. ${newRole==='advisor'?'يُزال ارتباط المستشار بأي قسم، ويصبح وظيفة مستقلة على مستوى القطاع مع الصلاحيات التنفيذية دون إضافة الموظفين.':returnsToDepartment?'يجب اختيار القسم الذي سيعمل فيه بعد سحب دور المستشار.':'لا يمكن تعيين رئيسين للقسم نفسه.'}</p><div class="action-row"><button type="submit" class="btn">تأكيد تغيير الصلاحية</button><button type="button" class="btn secondary" id="cancelRoleChange">إلغاء</button></div></form>`);
   $('cancelRoleChange').onclick=closeModal;
@@ -413,7 +415,7 @@ function userForm(u){
       payload.role=data.get('role')||'employee';
       payload.department_id=payload.role==='advisor'?null:Number(data.get('department_id'));
       payload.temporary_password=data.get('temporary_password');
-      if(payload.role==='head'&&state.departments.some(d=>d.id===payload.department_id&&d.name==='الإدارة العامة'))throw Error('الإدارة العامة جهة تنظيمية، اختر قسمًا فعليًا عند إنشاء رئيس قسم');
+      if(payload.role==='head'&&payload.department_id===state.organization.general_department_id)throw Error('الإدارة العامة جهة تنظيمية، اختر قسمًا فعليًا عند إنشاء رئيس قسم');
       await api('/users',{method:'POST',data:payload});
     }else{
       if(isExecutive(state.me.role)&&!advisorEdit)payload.department_id=Number(data.get('department_id'));
