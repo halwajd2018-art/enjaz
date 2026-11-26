@@ -1,10 +1,11 @@
 'use strict';
 const root=document.getElementById('root');
-const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false};
+const state={me:null,csrf:null,page:'dashboard',users:[],departments:[],tasks:[],dashboard:{},presence:null,activity:[],channel:'general',messages:[],selectedTask:null,actFilter:{},chatTimer:null,heartbeatTimer:null,presenceTimer:null,mailTimer:null,mailUnread:0,mailFolder:'inbox',mailSelected:null,mailThread:null,mailThreads:[],mailContacts:[],noticeTimer:null,discussionTimer:null,notices:null,noticeCount:0,chatUnread:0,noticeInitialized:false,taskRequestId:null,lastInteraction:Date.now(),loginAt:Date.now(),meetings:[],meetingConfig:null,meetingContacts:[],meetingUnread:0,videoRoom:null,videoMeetingId:null,directRoom:null,directCallId:null,directCalls:[],directContacts:[],directCallTimer:null,directCallBusy:false,lastIncomingCallId:null,roomChatChannel:null,roomChatTimer:null,roomChatLastId:0,roomChatBusy:false,roomChatArchive:false,organization:{revision:'0',general_department_id:null,general_department_name:'الإدارة العامة',roles:{}},organizationRefreshPending:false,permissions:{},permissionCatalog:[],permissionSelectedUserId:null,permissionSelectedSnapshot:null,permissionDraft:null};
 const $=id=>document.getElementById(id);
 const safe=s=>String(s===null||s===undefined?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=dt=>dt?new Date(dt).toLocaleString('ar-SA',{dateStyle:'short',timeStyle:'short',timeZone:'Asia/Riyadh'}):'—';
 const fdate=dt=>dt?new Date(dt+'T12:00:00').toLocaleDateString('ar-SA'):'—';
+const canDo=code=>state.permissions?.[code]?.allowed===true;
 const roles={director:'مدير عام الإدارة',advisor:'مستشار القطاع',head:'رئيس قسم',employee:'موظف'};
 const isExecutive=role=>role==='director'||role==='advisor';
 const affiliationLabel=u=>u.role==='advisor'?roles.advisor+' — ارتباط مستقل':(u.department||state.organization.general_department_name||'الإدارة العامة');
@@ -89,7 +90,7 @@ async function populateAttachments(taskId){
 }
 function request(fn){return async(...rgs)=>{try{await fn(...rgs)}catch(e){toast(e.message||'حدث خطأ')}}}
 async function init(){try{const data=await api('/me');state.me=data.user;state.csrf=data.csrf;await loadAll();startBackground();render()}catch(e){renderLogin()}}
-async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices,organization]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications'),api('/organization')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:false,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}
+async function loadAll(){const [users,departments,tasks,dashboard,presence,mailCount,notices,organization,permissionsData]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence'),api('/inbox/unread'),api('/notifications'),api('/organization'),api('/permissions/me')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,permissions:permissionsData.permissions,organizationRefreshPending:false,mailUnread:mailCount.unread_threads,notices,noticeCount:notices.total_unread,chatUnread:notices.chat_unread});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}
 async function pollOrganization(){if(!state.me)return;const organization=await api('/organization');if(organization.revision!==state.organization.revision){const [users,departments,tasks,dashboard,presence]=await Promise.all([api('/users'),api('/departments'),api('/tasks'),api('/dashboard'),api('/presence')]);Object.assign(state,{users,departments,tasks,dashboard,presence,organization,organizationRefreshPending:true});Object.assign(roles,organization.roles);const current=users.find(u=>u.id===state.me?.id);if(current)state.me={...state.me,department:current.department,department_id:current.department_id};}if(state.organizationRefreshPending&&!state.videoRoom&&!state.directRoom&&!document.querySelector('.modal-cover')&&!document.hidden){state.organizationRefreshPending=false;render();}}
 const noticeKinds={assigned:'تكليف جديد',review:'مهمة مكتملة تنتظر المراجعة',completed:'تم اعتماد المهمة واكتمالها',revision:'أُعيدت المهمة للتعديل',cancelled:'تم إلغاء التكليف'};
 function syncNoticeBadges(){
@@ -108,6 +109,14 @@ async function pollNotifications(quiet=false){
  if(!quiet&&state.noticeInitialized&&data.total_unread>old)toast('لديك إشعارات جديدة: رسالة أو محادثة أو تحديث مهمة');
  state.noticeInitialized=true;
  pollOrganization().catch(()=>{});
+ pollMyPermissions().catch(()=>{});
+}
+async function pollMyPermissions(){
+ if(!state.me)return;
+ const data=await api('/permissions/me');
+ const before=JSON.stringify(state.permissions);
+ state.permissions=data.permissions;
+ if(before!==JSON.stringify(data.permissions)&&state.page!=='permissions'&&!state.videoRoom&&!state.directRoom&&!document.querySelector('.modal-cover')&&!document.hidden)render();
 }
 function notificationCenterHtml(data){
  const ev=data.events||[];
@@ -131,14 +140,14 @@ function openNotificationCenter(){
 function renderLogin(){stopRoomChat();stopBackground();document.getElementById('directIncoming')?.remove();state.directCalls=[];root.innerHTML=`<div class="login-shell"><div class="login-card"><div class="logo-big"><span>إ</span> إنجاز</div><p class="hint">المنصة الإلكترونية لإدارة ومتابعة الأعمال عن بُعد</p><h1>تسجيل دخول الموظفين</h1><p class="hint">استخدم البريد الإلكتروني وكلمة المرور الخاصة بحسابك في المنصة.</p><form id="loginForm" class="form-stack"><label class="form-field">البريد الإلكتروني<input name="email" type="email" class="input" autocomplete="username" required maxlength="200"></label><label class="form-field">كلمة المرور<input name="password" type="password" class="input" autocomplete="current-password" required></label><p id="loginError" class="error"></p><button class="btn full" type="submit">دخول إلى المنصة</button></form><p class="hint">النسخة الأولية تستخدم حسابات داخلية مستقلة، وليست مرتبطة بعد بتسجيل الدخول المؤسسي Microsoft Entra ID.</p></div></div>`;
  $('loginForm').onsubmit=request(async e=>{e.preventDefault();let fd=new FormData(e.currentTarget);let btn=e.currentTarget.querySelector('button');btn.disabled=true;try{let response=await api('/auth/login',{method:'POST',data:{email:fd.get('email'),password:fd.get('password')}});state.me=response.user;state.csrf=response.csrf;state.page='dashboard';state.noticeInitialized=false;await loadAll();startBackground();render();if(state.me.must_change_password)changePasswordModal(true)}catch(error){$('loginError').textContent=error.message}finally{btn.disabled=false}});
 }
-function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['calls','📞','الاتصالات المباشرة'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||isExecutive(state.me.role))&&(x[0]!=='organization'||state.me.role==='director'))}
+function navItems(){return [['dashboard','▦','لوحة التحكم'],['tasks','☑','المهام والتكليفات'],['inbox','✉','البريد الوارد'],['chat','▤','مركز المحادثات'],['meetings','▣','الاجتماعات المرئية'],['calls','📞','الاتصالات المباشرة'],['activity','◷','سجل الدخول والنشاط'],['employees','♧','الموظفون والأقسام'],['organization','⚙','إدارة المسميات'],['permissions','🔐','إدارة الصلاحيات'],['audit','◈','سجل الإجراءات']].filter(x=>(x[0]!=='audit'||(isExecutive(state.me.role)&&canDo('audit.view')))&&(x[0]!=='activity'||canDo('activity.view'))&&(x[0]!=='organization'||state.me.role==='director')&&(x[0]!=='permissions'||state.me.role==='director'))}
 function renderShell(title,body){const m=state.me;root.innerHTML=`<div class="layout"><aside class="sidebar"><div class="logo">إنجاز<small>منصة إدارة الأعمال عن بُعد</small></div><nav class="nav">${navItems().map(([id,ico,label])=>`<button data-page="${id}" class="${id===state.page?'active':''}">${ico} <span>${label}</span>${id==='inbox'&&state.mailUnread?`<b class="mail-badge" data-mail-badge>${state.mailUnread}</b>`:''}${id==='chat'&&state.chatUnread?`<b class="mail-badge" data-chat-badge>${state.chatUnread}</b>`:''}${id==='meetings'&&state.meetingUnread?`<b class="mail-badge" data-meeting-badge>${state.meetingUnread}</b>`:''}${id==='calls'&&state.directCalls.some(c=>c.incoming)?`<b class="mail-badge" data-call-badge>●</b>`:''}</button>`).join('')}</nav><div class="sidebar-foot"><b>${safe(m.name)}</b><div>${safe(roles[m.role])}</div><small>${safe(affiliationLabel(m))}</small></div></aside><div class="workspace"><header class="topbar"><div><div class="sub">نظام إنجاز · البيئة متعددة المستخدمين</div><h1>${safe(title)}</h1></div><div class="profile"><button type="button" class="btn secondary small notice-bell" id="notificationBell" aria-label="الإشعارات">🔔 <span id="notificationCount">${state.noticeCount||''}</span></button><div class="avatar">${safe(m.name.substring(0,1))}</div><div class="label"><b>${safe(m.name)}</b><div class="hint">${safe(roles[m.role])}</div></div><button class="btn secondary small" id="changeEmailBtn">تعديل بريدي</button><button class="btn secondary small" id="changePwBtn">كلمة المرور</button><button class="btn outline small" id="logoutBtn">خروج</button></div></header><main class="page">${body}</main></div></div>`;
  document.querySelectorAll('[data-page]').forEach(btn=>btn.onclick=()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال أولًا');return}if(state.videoRoom)leaveVideoMeeting();stopRoomChat();state.page=btn.dataset.page;state.selectedTask=null;render()});
  $('logoutBtn').onclick=request(async()=>{if(state.directRoom){toast('أنه مشاركتك في الاتصال قبل تسجيل الخروج');return}await leaveVideoMeeting();await api('/auth/logout',{method:'POST'});state.me=null;state.csrf=null;renderLogin()});
  $('changePwBtn').onclick=()=>changePasswordModal(false);$('changeEmailBtn').onclick=()=>changeEmailModal();$('notificationBell').onclick=()=>openNotificationCenter();
 }
 function render(){if(!state.me)return renderLogin();if(state.page!=='chat'&&state.chatTimer){clearInterval(state.chatTimer);state.chatTimer=null}
- switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'calls':return renderDirectCalls();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'audit':return renderAudit();default:return renderDashboard()}}
+ switch(state.page){case'dashboard':return renderDashboard();case'tasks':return renderTasks();case'chat':return renderChat();case'meetings':return renderMeetings();case'calls':return renderDirectCalls();case'inbox':return renderInbox();case'activity':return renderActivity();case'employees':return renderEmployees();case'organization':return renderOrganization();case'permissions':return renderPermissions();case'audit':return renderAudit();default:return renderDashboard()}}
 function cards(){const d=state.dashboard;return `<div class="cards">${[['إجمالي التكليفات',d.total||0,'مهمة مسجلة'],['المهام المكتملة',d.done||0,'معتمدة نهائيًا'],['المهام المتأخرة',d.late||0,'تحتاج متابعة'],['متوسط الإنجاز',(d.progress||0)+'%','متوسط الأوزان']].map(([title,val,sub])=>`<div class="stat"><span>${title}</span><div class="metric">${val}</div><small>${sub}</small></div>`).join('')}</div>`}
 function status(t){return `<span class="pill ${safe(t.status)}">${safe(statuses[t.status]||t.status)}</span>`}
 function miniTask(t){return `<div class="task-card">${t.assignee_removed&&t.status!=='done'?'<p class="error">⚠ الموظف محذوف — تتطلب إعادة إسناد</p>':''}<div class="detail-head"><div class="task-title">${safe(t.title)}</div>${status(t)}</div><div class="task-desc">${safe(t.assignee)} · ${safe(t.department)}</div><div class="task-meta"><span class="pill ${safe(t.priority)}">${safe(priorities[t.priority])}</span><span class="hint">الاستحقاق: ${fdate(t.due_date)}</span><b>${t.progress}%</b></div><div class="bar"><span style="width:${t.progress}%"></span></div><div class="action-row"><button class="btn secondary small" data-task="${t.id}">فتح المهمة</button></div></div>`}
@@ -162,7 +171,7 @@ function renderDashboard(){const ds=state.dashboard.by_department||[],t=state.ta
 function renderTasks(){const visible=state.tasks;
  const unassigned=visible.filter(t=>t.assignee_removed&&t.status!=='done').length;
  const warning=unassigned&&state.me.role!=='employee'?`<div class="note" style="margin-bottom:14px">⚠ توجد <b>${unassigned}</b> مهمة غير منجزة كانت مسندة إلى موظفين محذوفين. افتح كل مهمة واختر «إعادة إسناد» لموظف نشط من القسم نفسه. لم تُحذف أي مهمة عند حذف الموظف.</div>`:'';
- const body=`${warning}<div class="page-head"><div><h2>مهام الإدارة</h2><p>التكليف ومتابعة المراحل ونسب الإنجاز والاعتمادات.</p></div>${state.me.role!=='employee'?'<button id="newTask" class="btn">＋ إضافة مهمة</button>':''}</div><div class="panel"><div class="filters"><select id="taskStatus" class="input"><option value="">جميع الحالات</option>${Object.entries(statuses).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select><input id="taskSearch" class="input" placeholder="بحث في المهام..." aria-label="بحث المهام"><span class="hint">${visible.length} مهمة في نطاق صلاحيتك</span></div><div id="taskList" class="grid2"></div></div>`;
+ const body=`${warning}<div class="page-head"><div><h2>مهام الإدارة</h2><p>التكليف ومتابعة المراحل ونسب الإنجاز والاعتمادات.</p></div>${canDo('tasks.create')&&state.me.role!=='employee'?'<button id="newTask" class="btn">＋ إضافة مهمة</button>':''}</div><div class="panel"><div class="filters"><select id="taskStatus" class="input"><option value="">جميع الحالات</option>${Object.entries(statuses).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select><input id="taskSearch" class="input" placeholder="بحث في المهام..." aria-label="بحث المهام"><span class="hint">${visible.length} مهمة في نطاق صلاحيتك</span></div><div id="taskList" class="grid2"></div></div>`;
  renderShell('إدارة المهام',body);const update=()=>{const needle=$('taskSearch').value.trim(),stat=$('taskStatus').value;const ts=visible.filter(t=>(!stat||t.status===stat)&&(!needle||t.title.includes(needle)||t.assignee.includes(needle)));$('taskList').innerHTML=ts.length?ts.map(miniTask).join(''):'<div class="empty">لا توجد مهام مطابقة</div>';attachTasks()};$('taskSearch').oninput=update;$('taskStatus').onchange=update;update();if($('newTask'))$('newTask').onclick=taskCreateModal;}
 function modal(title,html){closeModal();const cover=document.createElement('div');cover.className='modal-cover';cover.innerHTML=`<div class="modal" role="dialog" aria-modal="true" aria-label="${safe(title)}"><button type="button" class="modal-close" id="closeModal">إغلاق ×</button><h2>${safe(title)}</h2>${html}</div>`;document.body.appendChild(cover);$('closeModal').onclick=closeModal;cover.addEventListener('click',e=>{if(e.target===cover)closeModal()});return cover}
 const closeModal=()=>{document.querySelector('.modal-cover')?.remove();if(state.roomChatArchive)stopRoomChat();if(state.discussionTimer){clearInterval(state.discussionTimer);state.discussionTimer=null}};
@@ -243,6 +252,128 @@ function renderChat(){const available=channels();if(!available.some(c=>c.id===st
  $('messageForm').onsubmit=request(async e=>{e.preventDefault();const form=e.currentTarget;if(form.dataset.sending==='1')return;const text=form.elements.text.value.trim();const files=validateSharedSelection(form);if(!text&&!files.length)return;const b=form.querySelector('button[type="submit"]');b.disabled=true;form.dataset.sending='1';try{if(files.length){const data=new FormData(form);data.set('channel',state.channel);await sendSharedForm('/messages/upload',data)}else{await api('/messages',{method:'POST',data:{channel:state.channel,text}})}form.reset();await refreshMessages()}finally{b.disabled=false;form.dataset.sending='0'}});refreshMessages();if(state.chatTimer)clearInterval(state.chatTimer);state.chatTimer=setInterval(()=>{if(state.page==='chat')refreshMessages()},8000);
 }
 
+
+async function renderPermissions(){
+ if(!state.me||state.me.role!=='director'){state.page='dashboard';return renderDashboard()}
+ if(!state.permissionCatalog.length){
+  const catalog=await api('/permissions/catalog');
+  state.permissionCatalog=catalog.permissions||[];
+ }
+ if(state.page!=='permissions')return;
+ const eligible=state.users.filter(u=>u.role!=='director');
+ const selected=eligible.some(u=>u.id===state.permissionSelectedUserId)
+   ?state.permissionSelectedUserId:eligible[0]?.id;
+ state.permissionSelectedUserId=selected||null;
+ const categories=[...new Set(state.permissionCatalog.map(p=>p.group))];
+ renderShell('إدارة صلاحيات المستخدمين', '<div class="page-head"><div><h2>المصفوفة المركزية للصلاحيات</h2>'+
+  '<p>صلاحيات جميع أقسام إنجاز، مع تخصيص لكل موظف واحتفاظ النظام بنطاق الوصول الأصلي.</p></div></div>'+
+  '<div class="note"><b>نطاق التفويض:</b> القرارات الثلاثة: يرث الدور، سماح صريح ضمن الدور، أو منع. لا تمنح هذه الشاشة صلاحيات أعلى من مستوى الموظف أو تتيح الاطلاع على سجلات غير مخصصة له. صلاحيات المدير العام محمية وغير قابلة للتفويض.</div>'+
+  '<div class="permission-summary">'+
+  '<div class="stat"><span>إجمالي الصلاحيات</span><div class="metric">'+state.permissionCatalog.length+'</div></div>'+
+  '<div class="stat"><span>قابلة للتخصيص</span><div class="metric">'+state.permissionCatalog.filter(x=>x.editable).length+'</div></div>'+
+  '<div class="stat"><span>ضوابط ثابتة</span><div class="metric">'+state.permissionCatalog.filter(x=>!x.editable).length+'</div></div></div>'+
+  '<section class="panel"><div class="permission-toolbar"><label class="form-field">المستخدم'+
+  '<select id="permissionUser" class="input">'+eligible.map(u=>'<option value="'+u.id+'" '+(u.id===selected?'selected':'')+'>'+
+  safe(u.name)+' — '+safe(roles[u.role]||u.role)+' — '+safe(affiliationLabel(u))+'</option>').join('')+'</select></label>'+
+  '<label class="form-field">المجموعة<select id="permissionGroup" class="input"><option value="">جميع المجموعات</option>'+
+  categories.map(g=>'<option value="'+safe(g)+'">'+safe(g)+'</option>').join('')+'</select></label>'+
+  '<label class="form-field">بحث<input id="permissionSearch" class="input" placeholder="ابحث عن صلاحية أو وظيفة" maxlength="100"></label></div>'+
+  '<div id="permissionTarget" class="permission-target"></div>'+
+  '<div class="permission-table-wrap"><table class="permission-table"><thead><tr>'+
+  '<th>الصلاحية</th><th>الأصل حسب الدور</th><th>الحالة الفعلية</th><th>قرار المدير</th><th>حدود الصلاحية</th>'+
+  '</tr></thead><tbody id="permissionRows"></tbody></table></div>'+
+  '<label class="form-field permission-reason">سبب تعديل الصلاحيات<textarea id="permissionReason" class="input" minlength="5" maxlength="500" rows="2" placeholder="مثال: تفويض مؤقت لبدء الاجتماعات، أو حصر الاتصالات لدى رؤساء الأقسام"></textarea></label>'+ 
+  '<div class="permission-actions"><span id="permissionChanged" class="hint"></span>'+
+  '<button id="permissionSave" class="btn" disabled>حفظ التعديلات</button></div></section>'+
+  '<p class="footer-note">كل تعديل يُسجّل في سجل التدقيق. أي تغيير يُطبّق من الخادم في الطلب التالي، وتُحدّث الأزرار في المتصفح أثناء عمل الجلسة.</p>');
+ const control=$('permissionUser');
+ if(!eligible.length){
+  $('permissionTarget').innerHTML='<p class="hint">لا توجد حسابات موظفين يمكن إدارة صلاحياتها.</p>';
+  return;
+ }
+ control.onchange=request(async()=>{state.permissionSelectedUserId=Number(control.value);await loadPermissionTarget()});
+ $('permissionGroup').onchange=renderPermissionRows;
+ $('permissionSearch').oninput=renderPermissionRows;
+ $('permissionSave').onclick=request(savePermissionDraft);
+ await loadPermissionTarget();
+}
+async function loadPermissionTarget(){
+ const id=state.permissionSelectedUserId;
+ if(!id)return;
+ const area=$('permissionTarget');if(area)area.innerHTML='<p class="hint">جارٍ تحميل الصلاحيات...</p>';
+ const data=await api('/permissions/users/'+id);
+ if(state.permissionSelectedUserId!==id||state.page!=='permissions')return;
+ state.permissionSelectedSnapshot=data;
+ if($('permissionReason'))$('permissionReason').value='';
+ state.permissionDraft=Object.fromEntries(Object.entries(data.permissions).map(([key,val])=>[key,val.decision]));
+ const changes=$('permissionChanged');if(changes)changes.textContent='';
+ const area2=$('permissionTarget');
+ if(area2)area2.innerHTML='<b>'+safe(data.user.name)+'</b>'+
+  '<span class="hint"> · '+safe(roles[data.user.role]||data.user.role)+
+  ' · '+safe(data.user.department||'ارتباط إداري مستقل')+'</span>';
+ renderPermissionRows();
+}
+function permissionDraftChanges(){
+ const snapshot=state.permissionSelectedSnapshot;
+ if(!snapshot||!state.permissionDraft)return {};
+ const changed={};
+ for(const [key,decision] of Object.entries(state.permissionDraft)){
+  if(snapshot.permissions[key]?.decision!==decision)changed[key]=decision;
+ }
+ return changed;
+}
+function renderPermissionRows(){
+ const holder=$('permissionRows'), snapshot=state.permissionSelectedSnapshot;
+ if(!holder||!snapshot)return;
+ const role=snapshot.user.role;
+ const group=$('permissionGroup')?.value||'',term=($('permissionSearch')?.value||'').trim().toLowerCase();
+ const rows=state.permissionCatalog.filter(p=>(!group||p.group===group)&&
+  (!term||(p.label+' '+p.group+' '+p.code+' '+p.scope).toLowerCase().includes(term)));
+ let previous='';
+ const html=rows.map(p=>{
+  const userPerm=snapshot.permissions[p.code]||{};
+  const isInherited=p.roles.includes(role);
+  const canEdit=p.editable&&isInherited;
+  const status=(state.permissionDraft[p.code]==='deny')?'ممنوعة':isInherited?'مسموحة':'غير مخوّل';
+  const label=p.group!==previous?'<tr class="permission-group"><td colspan="5">'+safe(p.group)+'</td></tr>':'';
+  previous=p.group;
+  const choice=state.permissionDraft[p.code]||'inherit';
+  const control=canEdit?'<select class="input permission-decision" data-permission-code="'+safe(p.code)+'">'+
+   '<option value="inherit" '+(choice==='inherit'?'selected':'')+'>يرث المستوى</option>'+
+   '<option value="allow" '+(choice==='allow'?'selected':'')+'>سماح صريح</option>'+
+   '<option value="deny" '+(choice==='deny'?'selected':'')+'>منع</option></select>':
+   '<span class="permission-locked">'+(p.editable?'محكومة بالمستوى':'🔒 ثابتة')+'</span>';
+  return label+'<tr><td><b>'+safe(p.label)+'</b><small>'+safe(p.code)+'</small></td>'+
+   '<td>'+ (isInherited?'مسموح':'غير مسموح')+'</td>'+
+   '<td><span class="pill '+(status==='مسموحة'?'done':'offline')+'">'+status+'</span></td>'+
+   '<td>'+control+'</td><td><small>'+safe(p.scope)+'</small></td></tr>';
+ }).join('');
+ holder.innerHTML=html||'<tr><td colspan="5" class="hint">لا توجد صلاحيات مطابقة.</td></tr>';
+ holder.querySelectorAll('[data-permission-code]').forEach(select=>select.onchange=()=>{
+  state.permissionDraft[select.dataset.permissionCode]=select.value;
+  renderPermissionRows();
+ });
+ const updated=Object.keys(permissionDraftChanges()).length;
+ if($('permissionSave'))$('permissionSave').disabled=!updated;
+ if($('permissionChanged'))$('permissionChanged').textContent=updated?
+  'تغييرات غير محفوظة: '+updated+' صلاحية':'لا توجد تغييرات غير محفوظة';
+}
+async function savePermissionDraft(){
+ const id=state.permissionSelectedUserId;
+ const data=permissionDraftChanges();
+ if(!Object.keys(data).length)return;
+ if(!confirm('هل تؤكد تطبيق '+Object.keys(data).length+' تعديل/تعديلات على صلاحيات هذا المستخدم؟'))return;
+ const reason=String($('permissionReason')?.value||'').trim();
+ if(reason.length<5)throw Error('اكتب سببًا واضحًا للتعديل (خمسة أحرف على الأقل)');
+ const button=$('permissionSave');if(button)button.disabled=true;
+ try{
+  await api('/permissions/users/'+id,{method:'PATCH',data:{decisions:data,reason}});
+  await loadPermissionTarget();
+  if($('permissionReason'))$('permissionReason').value='';
+  toast('تم حفظ الصلاحيات وتوثيقها في سجل التدقيق');
+ }finally{if(button)button.disabled=false}
+}
+
 function renderOrganization(){
   if(!state.me||state.me.role!=='director'){state.page='dashboard';return renderDashboard()}
   const generalId=state.organization.general_department_id;
@@ -304,22 +435,23 @@ function renderEmployees(){
   const director=state.me.role==='director';
   const advisor=state.me.role==='advisor';
   const executive=director||advisor;
-  const canAdd=director||state.me.role==='head';
+  const canAdd=canDo('users.create')&&(director||state.me.role==='head');
   const heads=new Map(all.filter(u=>u.role==='head').map(u=>[u.department_id,u]));
   const rows=all.map(u=>{
     const currentHead=heads.get(u.department_id);
     const occupied=u.role==='employee'&&!!currentHead;
     const nonSection=u.department_id===state.organization.general_department_id;
-    const canEdit=executive?u.role!=='director'&&(director||u.role!=='advisor'):
-      state.me.role==='head'&&u.role==='employee'&&u.department_id===state.me.department_id;
+    const canEdit=canDo('users.edit')&&(executive?u.role!=='director'&&(director||u.role!=='advisor'):
+      state.me.role==='head'&&u.role==='employee'&&u.department_id===state.me.department_id);
     const buttons=[];
-    if(u.active&&u.id!==state.me.id)buttons.push(`<button class="btn secondary small" data-call-user="${u.id}" title="اتصال صوتي أو مرئي مباشر">📞 اتصال</button>`);
-    if(executive&&u.role==='employee'){
+    if(director&&u.role!=='director')buttons.push(`<button class="btn secondary small" data-grants-user="${u.id}">🔐 الصلاحيات</button>`);
+    if(u.active&&u.id!==state.me.id&&(canDo('calls.start.audio')||canDo('calls.start.video')))buttons.push(`<button class="btn secondary small" data-call-user="${u.id}" title="اتصال صوتي أو مرئي مباشر">📞 اتصال</button>`);
+    if(executive&&canDo('users.change_role')&&u.role==='employee'){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="head" ${occupied||nonSection||!u.active?'disabled':''} title="${nonSection?'الإدارة العامة ارتباط تنظيمي وليست قسمًا له رئيس':occupied?'يجب تحويل رئيس القسم الحالي إلى موظف أولًا':!u.active?'يلزم تفعيل الحساب قبل الترقية':'تعيين رئيس قسم'}">تعيين رئيس قسم</button>`);
       if(director)buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="advisor" ${!u.active?'disabled':''}>تعيين مستشار القطاع</button>`);
-    }else if(executive&&u.role==='head'){
+    }else if(executive&&canDo('users.change_role')&&u.role==='head'){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="employee">تحويل إلى موظف</button>`);
-    }else if(director&&u.role==='advisor'){
+    }else if(director&&canDo('users.change_role')&&u.role==='advisor'){
       buttons.push(`<button class="btn secondary small" data-role-user="${u.id}" data-target-role="employee">إلغاء دور المستشار</button>`);
     }
     const roleHint=executive&&occupied?`<small class="role-hint">رئيس القسم الحالي: ${safe(currentHead.name)} — يجب تحويله إلى موظف أولًا</small>`:'';
@@ -331,6 +463,7 @@ function renderEmployees(){
   if($('newUser'))$('newUser').onclick=()=>userForm();
   if($('importUsers'))$('importUsers').onclick=()=>importEmployeesModal();
   document.querySelectorAll('[data-edit-user]').forEach(el=>el.onclick=()=>userForm(state.users.find(u=>u.id===Number(el.dataset.editUser))));
+  document.querySelectorAll('[data-grants-user]').forEach(el=>el.onclick=()=>{state.permissionSelectedUserId=Number(el.dataset.grantsUser);state.page='permissions';render()});
   document.querySelectorAll('[data-call-user]').forEach(el=>el.onclick=request(()=>openDirectCallFromEmployee(Number(el.dataset.callUser))));
   document.querySelectorAll('[data-delete-user]').forEach(el=>el.onclick=request(()=>deleteEmployeeModal(state.users.find(u=>u.id===Number(el.dataset.deleteUser)))));
   document.querySelectorAll('[data-role-user]').forEach(el=>el.onclick=()=>changeRoleModal(state.users.find(u=>u.id===Number(el.dataset.roleUser)),el.dataset.targetRole));
@@ -546,8 +679,8 @@ async function renderMeetings(){
  const [data,config,contacts]=await Promise.all([api('/meetings'),api('/meetings/config'),api('/meetings/contacts')]);
  state.meetings=data.meetings;state.meetingConfig=config;state.meetingContacts=contacts;state.meetingUnread=0;
  await api('/meetings/seen',{method:'POST'});
- const rows=state.meetings.map(m=>`<article class="panel meeting-card"><div class="meeting-card-head"><div><h3>${safe(m.title)}</h3><p>${localMeetingDate(m.start_at)} · ${m.duration_minutes} دقيقة${m.task_id?' · مرتبطة بالتكليف #'+m.task_id:''}</p></div><span class="pill ${m.status==='scheduled'?'working':'done'}">${m.status==='scheduled'?'مجدول':m.status==='ending'?'جارٍ إغلاق الغرفة':'منتهٍ'}</span></div><p class="hint">${safe(m.description||'لا توجد ملاحظات إضافية')}</p><p class="meeting-members">المشاركون: ${m.participants.map(u=>safe(u.name)).join('، ')}</p>${m.minutes_text?`<div class="meeting-minutes-preview"><strong>محضر الاجتماع</strong><p>${safe(m.minutes_text)}</p></div>`:''}<div class="action-row">${m.is_organizer?`<button class="btn secondary" data-meeting-minutes="${m.id}">محضر الاجتماع</button>`:''}<button class="btn secondary" data-meeting-chat="${m.id}">سجل الدردشة</button><button class="btn" data-join-meeting="${m.id}" ${m.status!=='scheduled'||!config.video_enabled?'disabled':''}>دخول الاجتماع</button>${m.is_organizer&&['scheduled','ending'].includes(m.status)?`<button class="btn outline" data-end-meeting="${m.id}">${m.status==='ending'?'إعادة محاولة إغلاق الغرفة':'إنهاء الاجتماع للجميع'}</button>`:''}</div></article>`).join('');
- renderShell('الاجتماعات المرئية',`<div class="page-head"><div><h2>الاجتماعات المرئية داخل إنجاز</h2><p>دعوات خاصة حسب صلاحيات الإدارة، واجتماعات صوت وصورة ومشاركة شاشة داخل المنصة.</p></div><button id="newVideoMeeting" class="btn">＋ اجتماع جديد</button></div>${!config.video_enabled?'<p class="meeting-setup-warning">ميزة بث الفيديو غير مفعّلة حتى اعتماد وإضافة إعدادات LiveKit الآمنة. يمكنك إعداد الاجتماعات والدعوات الآن.</p>':''}<div class="meeting-cards">${rows||'<section class="panel empty">لا توجد اجتماعات مدعوة لك حتى الآن.</section>'}</div><p class="footer-note">لا يتم تسجيل الصوت أو الصورة، ولا تُخزن الوسائط في قاعدة بيانات إنجاز. الوصول للغرف مقيد بالدعوات.</p>`);
+ const rows=state.meetings.map(m=>`<article class="panel meeting-card"><div class="meeting-card-head"><div><h3>${safe(m.title)}</h3><p>${localMeetingDate(m.start_at)} · ${m.duration_minutes} دقيقة${m.task_id?' · مرتبطة بالتكليف #'+m.task_id:''}</p></div><span class="pill ${m.status==='scheduled'?'working':'done'}">${m.status==='scheduled'?'مجدول':m.status==='ending'?'جارٍ إغلاق الغرفة':'منتهٍ'}</span></div><p class="hint">${safe(m.description||'لا توجد ملاحظات إضافية')}</p><p class="meeting-members">المشاركون: ${m.participants.map(u=>safe(u.name)).join('، ')}</p>${m.minutes_text?`<div class="meeting-minutes-preview"><strong>محضر الاجتماع</strong><p>${safe(m.minutes_text)}</p></div>`:''}<div class="action-row">${m.is_organizer&&canDo('meetings.minutes')?`<button class="btn secondary" data-meeting-minutes="${m.id}">محضر الاجتماع</button>`:''}<button class="btn secondary" data-meeting-chat="${m.id}">سجل الدردشة</button><button class="btn" data-join-meeting="${m.id}" ${m.status!=='scheduled'||!config.video_enabled||!canDo('meetings.join')?'disabled':''}>دخول الاجتماع</button>${m.is_organizer&&canDo('meetings.end')&&['scheduled','ending'].includes(m.status)?`<button class="btn outline" data-end-meeting="${m.id}">${m.status==='ending'?'إعادة محاولة إغلاق الغرفة':'إنهاء الاجتماع للجميع'}</button>`:''}</div></article>`).join('');
+ renderShell('الاجتماعات المرئية',`<div class="page-head"><div><h2>الاجتماعات المرئية داخل إنجاز</h2><p>دعوات خاصة حسب صلاحيات الإدارة، واجتماعات صوت وصورة ومشاركة شاشة داخل المنصة.</p></div><button id="newVideoMeeting" class="btn" ${canDo('meetings.create')?'':'disabled'}>＋ اجتماع جديد</button></div>${!config.video_enabled?'<p class="meeting-setup-warning">ميزة بث الفيديو غير مفعّلة حتى اعتماد وإضافة إعدادات LiveKit الآمنة. يمكنك إعداد الاجتماعات والدعوات الآن.</p>':''}<div class="meeting-cards">${rows||'<section class="panel empty">لا توجد اجتماعات مدعوة لك حتى الآن.</section>'}</div><p class="footer-note">لا يتم تسجيل الصوت أو الصورة، ولا تُخزن الوسائط في قاعدة بيانات إنجاز. الوصول للغرف مقيد بالدعوات.</p>`);
  $('newVideoMeeting').onclick=()=>createVideoMeetingModal();
  document.querySelectorAll('[data-meeting-minutes]').forEach(b=>b.onclick=()=>editMeetingMinutes(Number(b.dataset.meetingMinutes)));
  document.querySelectorAll('[data-meeting-chat]').forEach(b=>b.onclick=()=>openSessionChatArchive('meeting:'+Number(b.dataset.meetingChat),'الاجتماع'));
@@ -736,7 +869,7 @@ function showDirectIncoming(call){
  const caller=call.participants.find(p=>p.id===call.initiator_id);
  box.innerHTML='<div class="direct-incoming-title">📞 اتصال '+(call.mode==='audio'?'صوتي':'مرئي')+' وارد</div>'+
   '<p><b>'+safe(caller?.name||'موظف')+'</b> يدعوك إلى اتصال مباشر'+(call.participants.length>2?' مع '+(call.participants.length-2)+' مشاركين آخرين':'')+'</p>'+
-  '<div class="action-row"><button class="btn" id="acceptDirectIncoming">قبول الاتصال</button>'+
+  '<div class="action-row"><button class="btn" id="acceptDirectIncoming" '+(!canDo('calls.accept')?'disabled':'')+'>قبول الاتصال</button>'+
   '<button class="btn danger" id="declineDirectIncoming">رفض</button></div>';
  $('acceptDirectIncoming').onclick=request(async()=>{if(state.videoRoom)throw Error('أنه مشاركتك في الاجتماع المجدول أولًا');await acceptDirectCall(call.id)});
  $('declineDirectIncoming').onclick=request(async()=>{await api('/calls/'+call.id+'/decline',{method:'POST'});box.remove();await pollDirectCalls()});
@@ -763,11 +896,11 @@ async function renderDirectCalls(){
  renderShell('الاتصالات الصوتية والمرئية',
   '<div class="page-head"><div><h2>اتصال مباشر بدون موعد</h2><p>اتصل بموظف أو مجموعة فورًا؛ ستظهر لهم دعوة لقبول المكالمة أو رفضها.</p></div><button class="btn secondary" id="enableDirectAlerts">🔔 تفعيل رنين المكالمات</button></div>'+
   '<section class="panel"><h3>بدء اتصال جديد</h3><form id="directStartForm" class="form-stack">'+
-  '<div class="direct-call-type"><label><input type="radio" name="mode" value="video" checked> 📹 مرئي</label>'+
-  '<label><input type="radio" name="mode" value="audio"> 🎙️ صوتي</label></div>'+
+  '<div class="direct-call-type"><label><input type="radio" name="mode" value="video" '+(canDo('calls.start.video')?'checked':'disabled')+'> 📹 مرئي</label>'+
+  '<label><input type="radio" name="mode" value="audio" '+(canDo('calls.start.audio')&&!canDo('calls.start.video')?'checked':'')+' '+(!canDo('calls.start.audio')?'disabled':'')+'> 🎙️ صوتي</label></div>'+
   '<p class="hint">اختر من موظف واحد إلى 15 موظفًا؛ لا حاجة لإنشاء اجتماع مجدول.</p>'+
   '<div class="direct-contacts">'+directCallContactsMarkup(contacts,[state.me.id])+'</div>'+
-  '<div class="action-row"><button class="btn" type="submit" '+(!response.video_enabled?'disabled':'')+'>بدء الاتصال الآن</button></div></form>'+
+  '<div class="action-row"><button class="btn" type="submit" '+(!response.video_enabled||(!canDo('calls.start.video')&&!canDo('calls.start.audio'))?'disabled':'')+'>بدء الاتصال الآن</button></div></form>'+
   (!response.video_enabled?'<p class="error">خدمة الصوت والصورة غير متاحة من إعدادات النظام.</p>':'')+'</section>'+
   '<section class="panel" style="margin-top:16px"><h3>الاتصالات الحالية والسجل الأخير</h3><div id="directCallHistory"></div></section>'+
   '<p class="footer-note">يظهر تنبيه المكالمة الواردة أثناء فتح إنجاز في المتصفح، وليس كإشعار هاتف خارج التطبيق. لا يُسجَّل صوت أو فيديو المكالمات.</p>');
@@ -777,7 +910,8 @@ async function renderDirectCalls(){
   e.preventDefault();const form=e.currentTarget;
   const ids=Array.from(form.querySelectorAll('input[name="call_invitee"]:checked')).map(i=>Number(i.value));
   if(!ids.length)throw Error('اختر موظفًا واحدًا على الأقل');
-  const mode=form.querySelector('input[name="mode"]:checked').value;
+  const mode=form.querySelector('input[name="mode"]:checked')?.value;
+  if(!mode||!canDo('calls.start.'+mode))throw Error('ليس لديك صلاحية بدء هذا النوع من المكالمات');
   const button=form.querySelector('button[type="submit"]');button.disabled=true;
   try{const call=await api('/calls',{method:'POST',data:{invitee_ids:ids,mode}});
     state.directCalls.unshift(call);await connectDirectCall(call)}
@@ -791,8 +925,8 @@ function updateDirectCallHistory(){
   const names=c.participants.filter(p=>p.id!==state.me.id).map(p=>safe(p.name)).join('، ');
   const actions=[];
   if(['accepted','left'].includes(c.my_status))actions.push('<button class="btn secondary small" data-direct-chat="'+c.id+'">الدردشة</button>');
-  if(c.incoming)actions.push('<button class="btn small" data-direct-accept="'+c.id+'">قبول</button><button class="btn danger small" data-direct-decline="'+c.id+'">رفض</button>');
-  if(['ringing','active'].includes(c.status)&&c.my_status==='accepted')actions.push('<button class="btn secondary small" data-direct-join="'+c.id+'">دخول الاتصال</button>');
+  if(c.incoming)actions.push('<button class="btn small" data-direct-accept="'+c.id+'" '+(!canDo('calls.accept')?'disabled':'')+'>قبول</button><button class="btn danger small" data-direct-decline="'+c.id+'">رفض</button>');
+  if(canDo('calls.join')&&['ringing','active'].includes(c.status)&&c.my_status==='accepted')actions.push('<button class="btn secondary small" data-direct-join="'+c.id+'">دخول الاتصال</button>');
   if(c.is_initiator&&['ringing','active','ending'].includes(c.status))actions.push('<button class="btn danger small" data-direct-end="'+c.id+'">'+(c.status==='ending'?'إعادة الإغلاق':'إنهاء للجميع')+'</button>');
   return '<div class="direct-history-row"><div><b>'+(c.mode==='audio'?'🎙️ اتصال صوتي':'📹 اتصال مرئي')+' · '+safe(directStatusLabels[c.status]||c.status)+'</b>'+
    '<small>'+safe(fmt(c.created_at))+' · '+(names||'—')+' · '+c.participants.length+' مشاركين</small></div>'+
@@ -809,10 +943,11 @@ async function openDirectCallFromEmployee(userId){
  const contacts=await api('/calls/contacts');
  const user=contacts.find(u=>u.id===userId);
  if(!user)throw Error('هذا الموظف غير متاح للاتصال');
+ if(!canDo('calls.start.audio')&&!canDo('calls.start.video'))throw Error('ليس لديك صلاحية بدء مكالمة');
  modal('بدء اتصال مع '+user.name,
   '<div class="note">سيظهر للموظف إشعار داخل منصة إنجاز للقبول أو الرفض.</div>'+
-  '<div class="action-row"><button id="quickVideoCall" class="btn">📹 اتصال مرئي</button>'+
-  '<button id="quickAudioCall" class="btn secondary">🎙️ اتصال صوتي</button></div>');
+  '<div class="action-row"><button id="quickVideoCall" class="btn" '+(!canDo('calls.start.video')?'disabled':'')+'>📹 اتصال مرئي</button>'+
+  '<button id="quickAudioCall" class="btn secondary" '+(!canDo('calls.start.audio')?'disabled':'')+'>🎙️ اتصال صوتي</button></div>');
  const start=(mode)=>request(async()=>{
   const call=await api('/calls',{method:'POST',data:{invitee_ids:[userId],mode}});
   closeModal();state.directCalls.unshift(call);await connectDirectCall(call);
@@ -843,7 +978,7 @@ async function connectDirectCall(call){
   '<div class="meeting-controls"><button class="btn secondary" id="meetingMic">🎤 تشغيل الميكروفون</button>'+
   '<button class="btn secondary" id="meetingCam">📷 تشغيل الكاميرا</button>'+
   '<button class="btn secondary" id="meetingScreen">▣ مشاركة الشاشة</button>'+
-  '<button class="btn outline" id="directInviteMore" '+(!call.is_initiator||call.participants.length>=16?'disabled':'')+'>＋ إضافة مشارك</button>'+
+  '<button class="btn outline" id="directInviteMore" '+(!call.is_initiator||call.participants.length>=16||!canDo('calls.invite')?'disabled':'')+'>＋ إضافة مشارك</button>'+
   '<button class="btn danger" id="directLeaveCall">'+(call.is_initiator?'إنهاء الاتصال للجميع':'مغادرة الاتصال')+'</button></div>'+
   '<p class="hint">لا تحتاج المكالمة إلى موعد أو رابط عام. يُسمح بالانضمام للمستخدمين الذين قبلوا دعوتهم فقط.</p></section>'+roomChatHtml('call:'+call.id)+'</div>');
  mountRoomChat('call:'+call.id);

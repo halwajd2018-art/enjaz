@@ -88,6 +88,17 @@ class Department(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(160), unique=True)
 
+class UserPermissionOverride(Base):
+    """Per-user permissions: inherit role, explicitly allow within role, or deny."""
+    __tablename__ = 'user_permission_overrides'
+    __table_args__ = (UniqueConstraint('user_id','permission',name='uq_user_permission'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    permission: Mapped[str] = mapped_column(String(90))
+    decision: Mapped[str] = mapped_column(String(10))
+    changed_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=NOW)
+
 class OrganizationSetting(Base):
     __tablename__ = 'organization_settings'
     key: Mapped[str] = mapped_column(String(70), primary_key=True)
@@ -326,6 +337,82 @@ class LoginAttempt(Base):
 
 Base.metadata.create_all(engine)  # for pilot; production schema changes use versioned migrations
 
+# Immutable catalog is the reviewed source for backend and director's matrix.
+# 'adjustable' means a director can restrict or restore a permission WITHIN the
+# role's original entitlement. Role/department/object scopes are never bypassed.
+ALL_ROLES = ('director','advisor','head','employee')
+EXEC_ROLES = ('director','advisor')
+MANAGER_ROLES = ('director','advisor','head')
+PERMISSION_REGISTRY = {
+    'meetings.create': ('الاجتماعات', 'جدولة اجتماع جديد', ALL_ROLES, 'adjustable', 'مع الالتزام بنطاق دعوة المشاركين'),
+    'meetings.join': ('الاجتماعات', 'الدخول إلى اجتماع مدعو إليه', ALL_ROLES, 'adjustable', 'بدعوة صريحة وضمن توقيت الاجتماع'),
+    'meetings.end': ('الاجتماعات', 'إنهاء الاجتماع للجميع', ALL_ROLES, 'locked', 'حق إغلاق للطوارئ، لمنظم الاجتماع فقط'),
+    'meetings.minutes': ('الاجتماعات', 'كتابة محضر الاجتماع', ALL_ROLES, 'adjustable', 'منظم الاجتماع فقط'),
+    'calls.start.audio': ('الاتصالات المباشرة', 'بدء مكالمة صوتية', ALL_ROLES, 'adjustable', 'مع التقيد بنطاق الدعوات'),
+    'calls.start.video': ('الاتصالات المباشرة', 'بدء مكالمة مرئية', ALL_ROLES, 'adjustable', 'مع التقيد بنطاق الدعوات'),
+    'calls.accept': ('الاتصالات المباشرة', 'قبول مكالمة واردة', ALL_ROLES, 'adjustable', 'المستخدم المدعو فقط'),
+    'calls.join': ('الاتصالات المباشرة', 'الدخول إلى مكالمة مقبولة', ALL_ROLES, 'adjustable', 'يشترط قبول الدعوة'),
+    'calls.invite': ('الاتصالات المباشرة', 'إضافة مشاركين إلى مكالمة', ALL_ROLES, 'adjustable', 'منشئ المكالمة فقط'),
+    'calls.end': ('الاتصالات المباشرة', 'إنهاء المكالمة للجميع', ALL_ROLES, 'locked', 'حق إغلاق للطوارئ، لمنشئ المكالمة فقط'),
+    'chat.send': ('المحادثات', 'إرسال رسالة نصية', ALL_ROLES, 'adjustable', 'قنوات المستخدم المصرح بها فقط'),
+    'chat.upload': ('المحادثات', 'إرسال مرفق في الدردشة', ALL_ROLES, 'adjustable', 'حدود أنواع الملفات والحجم قائمة'),
+    'chat.moderate': ('المحادثات', 'الإشراف وحجب الرسائل', MANAGER_ROLES, 'adjustable', 'حسب نطاق الإشراف الأصلي'),
+    'mail.send': ('البريد الداخلي', 'إنشاء مراسلة أو الرد عليها', ALL_ROLES, 'adjustable', 'ضمن المشاركين المخولين'),
+    'mail.upload': ('البريد الداخلي', 'إرسال مرفقات البريد', ALL_ROLES, 'adjustable', 'ضمن المشاركين وحدود الملفات'),
+    'tasks.create': ('التكليفات', 'إنشاء تكليف', MANAGER_ROLES, 'adjustable', 'حسب القسم والصلاحيات الأصلية'),
+    'tasks.assign': ('التكليفات', 'إعادة إسناد تكليف', MANAGER_ROLES, 'adjustable', 'حسب حدود الاعتماد والقسم'),
+    'tasks.approve': ('التكليفات', 'اعتماد التكليف أو طلب التعديل', MANAGER_ROLES, 'adjustable', 'حسب حدود الاعتماد والقسم'),
+    'tasks.cancel': ('التكليفات', 'إلغاء تكليف', MANAGER_ROLES, 'adjustable', 'مصدر التكليف أو الإدارة التنفيذية'),
+    'tasks.upload': ('التكليفات', 'إرفاق ملف بالتكليف', ALL_ROLES, 'adjustable', 'وفق صلة المستخدم بالتكليف'),
+    'users.create': ('المستخدمون', 'إنشاء حساب موظف', ('director','head'), 'adjustable', 'رئيس القسم ينشئ موظفي قسمه فقط'),
+    'users.edit': ('المستخدمون', 'تعديل حساب موظف', MANAGER_ROLES, 'adjustable', 'قيود الدور والبريد والنطاق قائمة'),
+    'users.change_role': ('المستخدمون', 'تغيير مستوى إداري', EXEC_ROLES, 'adjustable', 'المستشار لا يعين مستشارًا'),
+    'users.import': ('المستخدمون', 'استيراد الموظفين من Excel', ('director',), 'locked', 'مدير الإدارة فقط'),
+    'users.remove': ('المستخدمون', 'إزالة حساب موظف', ('director',), 'locked', 'مدير الإدارة فقط؛ حذف إداري غير مدمر'),
+    'organization.departments': ('الهيكل الإداري', 'تغيير مسميات الأقسام', ('director',), 'locked', 'مدير الإدارة فقط'),
+    'organization.levels': ('الهيكل الإداري', 'تغيير مسميات المستويات', ('director',), 'locked', 'مدير الإدارة فقط'),
+    'permissions.manage': ('إدارة الصلاحيات', 'تحديد صلاحيات المستخدمين', ('director',), 'locked', 'لا يمكن تفويضها'),
+    'audit.view': ('التقارير والحوكمة', 'الاطلاع على سجل التدقيق', EXEC_ROLES, 'adjustable', 'لا يغير حدود المعلومات الأساسية'),
+    'activity.view': ('التقارير والحوكمة', 'عرض وتصدير سجل الدخول', ALL_ROLES, 'adjustable', 'عرض عام للتنفيذي فقط؛ باقي الأدوار لبياناتها'),
+    'dashboard.view': ('التقارير والحوكمة', 'عرض لوحة التحكم', ALL_ROLES, 'locked', 'حسب نطاق الدور دون كشف أقسام أخرى'),
+    'tasks.view': ('التكليفات', 'عرض التكليفات المصرح بها', ALL_ROLES, 'locked', 'القسم أو التكليف الشخصي'),
+    'tasks.work': ('التكليفات', 'تنفيذ مهمة ورفعها للمراجعة', ALL_ROLES, 'locked', 'المكلف أو المعتمد ضمن نطاقه'),
+    'mail.read': ('البريد الداخلي', 'قراءة المراسلات', ALL_ROLES, 'locked', 'المرسل والمستقبل فقط'),
+    'chat.read': ('المحادثات', 'قراءة الرسائل والمرفقات', ALL_ROLES, 'locked', 'فقط قنوات وأعضاء الجلسات المخولين'),
+    'calls.read': ('الاتصالات المباشرة', 'عرض سجل المكالمات', ALL_ROLES, 'locked', 'مكالمات المستخدم فقط'),
+    'meetings.read': ('الاجتماعات', 'عرض الاجتماعات', ALL_ROLES, 'locked', 'المدعوون فقط'),
+    'profile.self': ('المستخدمون', 'تعديل البريد وكلمة المرور الشخصية', ALL_ROLES, 'locked', 'صاحب الحساب فقط'),
+}
+
+def permission_allowed(db: Session, user: User, code: str) -> bool:
+    """Fail closed for unknown permissions; per-user grants never elevate roles."""
+    definition = PERMISSION_REGISTRY.get(code)
+    if not definition:
+        return False
+    default = user.role in definition[2]
+    if user.role == 'director' or definition[3] != 'adjustable':
+        return default
+    row = db.scalar(select(UserPermissionOverride).where(
+        UserPermissionOverride.user_id==user.id,
+        UserPermissionOverride.permission==code))
+    if row and row.decision == 'deny':
+        return False
+    return default
+
+def require_permission(db: Session, user: User, code: str):
+    if not permission_allowed(db, user, code):
+        raise HTTPException(403, 'لا تملك صلاحية: '+PERMISSION_REGISTRY[code][1])
+
+def user_permission_snapshot(db: Session, user: User):
+    decisions={x.permission:x.decision for x in db.scalars(select(UserPermissionOverride).where(
+        UserPermissionOverride.user_id==user.id)).all()}
+    result={}
+    for code, (group,label,roles,kind,scope) in PERMISSION_REGISTRY.items():
+        result[code]={'allowed':permission_allowed(db,user,code),
+                      'inherited':user.role in roles,
+                      'decision':decisions.get(code,'inherit') if kind=='adjustable' and user.role!='director' else 'locked'}
+    return result
+
 def general_department(db: Session):
     """Resolve the permanent organizational ID even if its display name is edited."""
     setting = db.get(OrganizationSetting, 'general_department_id')
@@ -547,6 +634,11 @@ class UserEdit(BaseModel):
 class UserDeleteBody(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
+class PermissionOverridesUpdate(BaseModel):
+    # Unspecified keys are unchanged; 'inherit' deletes the override.
+    decisions: dict[str,str] = Field(min_length=1,max_length=40)
+    reason: str = Field(min_length=5,max_length=500)
+
 class DepartmentRenameBody(BaseModel):
     name: str = Field(min_length=2, max_length=160)
 
@@ -675,6 +767,71 @@ def update_own_email(data:ChangeEmailBody,db:Session=Depends(get_db),s=Depends(r
     return {'ok':True,'user':user_data(s.user)}
 
 
+# Permissions matrix: owner-only access, no secrets and no cross-user API reads.
+@app.get('/api/permissions/catalog')
+def permission_catalog(db: Session=Depends(get_db),s=Depends(require_login)):
+    if s.user.role!='director':raise HTTPException(403,'الإدارة المركزية للصلاحيات للمدير العام فقط')
+    return {'roles':list(ALL_ROLES),'permissions':[
+        {'code':code,'group':item[0],'label':item[1],'roles':list(item[2]),
+         'editable':item[3]=='adjustable','scope':item[4]}
+        for code,item in PERMISSION_REGISTRY.items()]}
+
+@app.get('/api/permissions/me')
+def my_permissions(db: Session=Depends(get_db),s=Depends(require_login)):
+    return {'user_id':s.user_id,'role':s.user.role,
+            'permissions':user_permission_snapshot(db,s.user)}
+
+@app.get('/api/permissions/users/{user_id}')
+def get_user_permissions(user_id:int,db: Session=Depends(get_db),s=Depends(require_login)):
+    if s.user.role!='director':raise HTTPException(403,'الصلاحية غير متاحة')
+    target=db.get(User,user_id)
+    if not target or db.get(UserRemoval,user_id):raise HTTPException(404,'المستخدم غير موجود')
+    return {'user':user_data(target),'permissions':user_permission_snapshot(db,target)}
+
+@app.patch('/api/permissions/users/{user_id}')
+def update_user_permissions(user_id:int,data:PermissionOverridesUpdate,
+                            db: Session=Depends(get_db),s=Depends(require_login)):
+    if s.user.role!='director':raise HTTPException(403,'تعديل الصلاحيات متاح للمدير العام فقط')
+    target=db.scalar(select(User).where(User.id==user_id).with_for_update())
+    if not target or db.get(UserRemoval,user_id):raise HTTPException(404,'المستخدم غير موجود')
+    if user_id==s.user_id or target.role=='director':
+        raise HTTPException(403,'لا يمكن تعديل صلاحيات المدير العام أو تعديل صلاحياتك عبر هذه الشاشة')
+    for code,choice in data.decisions.items():
+        spec=PERMISSION_REGISTRY.get(code)
+        if not spec or spec[3]!='adjustable':
+            raise HTTPException(422,'الصلاحية ليست متاحة للتفويض: '+str(code)[:90])
+        if choice not in ('inherit','allow','deny'):
+            raise HTTPException(422,'قيمة تفويض غير معتمدة')
+        if choice=='allow' and target.role not in spec[2]:
+            raise HTTPException(422,'لا يمكن منح هذه الصلاحية خارج المستوى الإداري المصرح')
+    reason=data.reason.strip()
+    if len(reason)<5:raise HTTPException(422,'سبب التعديل مطلوب (5 أحرف على الأقل)')
+    changed=[]
+    for code,choice in data.decisions.items():
+        row=db.scalar(select(UserPermissionOverride).where(
+            UserPermissionOverride.user_id==target.id,
+            UserPermissionOverride.permission==code))
+        previous=row.decision if row else 'inherit'
+        if previous==choice:continue
+        if choice=='inherit':
+            if row:db.delete(row)
+        elif row:
+            row.decision=choice
+            row.changed_by=s.user_id
+            row.updated_at=NOW()
+        else:
+            db.add(UserPermissionOverride(user_id=target.id,permission=code,
+                                          decision=choice,changed_by=s.user_id))
+        changed.append(f'{code}:{previous}->{choice}')
+    if changed:
+        for change in changed:
+            audit(db,s.user_id,'user_permissions_changed',
+                  f'user={target.id};{change};reason={reason}')
+        db.commit()
+    return {'ok':True,'updated':len(changed),
+            'user':user_data(target),
+            'permissions':user_permission_snapshot(db,target)}
+
 @app.get('/api/departments')
 def departments(db: Session=Depends(get_db),s=Depends(require_login)):
     return [{'id':d.id,'name':d.name} for d in db.scalars(select(Department).order_by(Department.id))]
@@ -687,6 +844,7 @@ def get_organization(db: Session=Depends(get_db),s=Depends(require_login)):
 @app.patch('/api/departments/{department_id}')
 def rename_department(department_id: int, data: DepartmentRenameBody,
                       db: Session=Depends(get_db), s=Depends(require_login)):
+    require_permission(db,s.user,'organization.departments')
     if s.user.role != 'director':
         raise HTTPException(403, 'تعديل أسماء الأقسام متاح للمدير العام فقط')
     dept = db.scalar(select(Department).where(Department.id == department_id).with_for_update())
@@ -710,6 +868,7 @@ def rename_department(department_id: int, data: DepartmentRenameBody,
 @app.patch('/api/organization/role-labels')
 def rename_role_labels(data: RoleLabelsBody, db: Session=Depends(get_db),
                        s=Depends(require_login)):
+    require_permission(db,s.user,'organization.levels')
     if s.user.role != 'director':
         raise HTTPException(403, 'تعديل مسميات المستويات الإدارية متاح للمدير العام فقط')
     labels = {role: normalized_organization_label(getattr(data, role), 80)
@@ -756,6 +915,7 @@ def require_free_department_head(db: Session, department_id: int):
 
 @app.patch('/api/users/{user_id}/role')
 def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get_db), s=Depends(require_login)):
+    require_permission(db,s.user,'users.change_role')
     """Director controls advisor appointments; advisor may manage heads/employees, not other advisors."""
     me = s.user
     if not is_executive(me):
@@ -822,6 +982,7 @@ def change_user_role(user_id: int, data: UserRoleChange, db: Session=Depends(get
 
 @app.post('/api/users',status_code=201)
 def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'users.create')
     me=s.user
     if me.role not in ('head','director'):raise HTTPException(403,'الصلاحية غير متاحة')
     if data.role not in ('head','employee','advisor') or (me.role=='head' and data.role!='employee'):
@@ -843,6 +1004,7 @@ def create_user(data: UserCreate, db: Session=Depends(get_db),s=Depends(require_
 
 @app.patch('/api/users/{user_id}')
 def edit_user(user_id:int,data:UserEdit,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'users.edit')
     me=s.user;u=db.get(User,user_id)
     if not u:raise HTTPException(404,'الموظف غير موجود')
     assert_not_removed(db,u)
@@ -1196,6 +1358,7 @@ def task_notice(db, recipient_id:int, actor_id:int, task:Task, kind:str):
 
 @app.post('/api/tasks',status_code=201)
 def create_task(data:TaskCreate,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.create')
     me=s.user
     if me.role=='employee':raise HTTPException(403,'لا يمكنك إنشاء التكليفات')
     if me.role=='head' and me.department_id!=data.department_id:raise HTTPException(403,'القسم غير مسموح')
@@ -1234,6 +1397,7 @@ def create_task(data:TaskCreate,db:Session=Depends(get_db),s=Depends(require_log
 
 @app.delete('/api/tasks/{task_id}')
 def cancel_task(task_id:int,data:TaskDeleteBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.cancel')
     task=get_task(db,task_id,s.user)
     if not is_executive(s.user) and task.created_by!=s.user_id:
         raise HTTPException(403,'حذف التكليف متاح لمصدره أو المدير العام فقط')
@@ -1381,6 +1545,7 @@ def list_attachments(task_id:int, db:Session=Depends(get_db), s=Depends(require_
 @app.post('/api/tasks/{task_id}/attachments', status_code=201)
 async def upload_attachment(task_id:int, file: UploadFile=File(...), category:str=Form('result'),
                             db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.upload')
     task=get_task(db,task_id,s.user)
     if s.user.id not in (task.assigned_to, task.created_by) and not can_approve(s.user,task):
         raise HTTPException(403, 'لا تملك صلاحية الإرفاق لهذه المهمة')
@@ -1434,6 +1599,7 @@ def download_attachment(task_id:int, attachment_id:int,db:Session=Depends(get_db
 
 @app.post('/api/tasks/{task_id}/assign')
 def assign_task(task_id:int,data:AssignBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.assign')
     me=s.user;t=get_task(db,task_id,me)
     if not can_approve(me,t):raise HTTPException(403,'ليس لديك صلاحية إعادة التكليف')
     if t.status=='done':raise HTTPException(409,'لا يمكن إعادة إسناد مهمة مكتملة')
@@ -1468,6 +1634,7 @@ def submit_task(task_id:int,data:SubmitBody,db:Session=Depends(get_db),s=Depends
 
 @app.post('/api/tasks/{task_id}/decision')
 def task_decision(task_id:int,data:Decision,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'tasks.approve')
     me=s.user;t=get_task(db,task_id,me)
     if not can_approve(me,t):raise HTTPException(403,'ليس لديك صلاحية الاعتماد')
     if t.status != 'review':raise HTTPException(409,'المهمة ليست قيد المراجعة')
@@ -1619,6 +1786,7 @@ def get_messages(channel:str='general',after:int=0,db:Session=Depends(get_db),s=
 
 @app.post('/api/messages',status_code=201)
 def post_message(data:MessageCreate,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'chat.send')
     if not allowed_channel(s.user,data.channel,db,write=True):raise HTTPException(403,'المحادثة غير متاحة')
     m=Message(channel=data.channel,sender_id=s.user_id,text=data.text.strip());db.add(m);db.flush();audit(db,s.user_id,'message',data.channel);db.commit()
     return {'id':m.id,'ok':True}
@@ -1626,6 +1794,7 @@ def post_message(data:MessageCreate,db:Session=Depends(get_db),s=Depends(require
 @app.post('/api/messages/upload',status_code=201)
 async def post_message_with_files(channel:str=Form(...),text:str=Form(''),files:list[UploadFile]=File(...),
                                   db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'chat.upload')
     if not allowed_channel(s.user,channel,db,write=True):raise HTTPException(403,'المحادثة غير متاحة')
     message=text.strip()
     if len(message)>4000:raise HTTPException(400,'نص المحادثة طويل جدًا')
@@ -1648,6 +1817,7 @@ async def post_message_with_files(channel:str=Form(...),text:str=Form(''),files:
 
 @app.delete('/api/messages/{message_id}')
 def moderate_chat(message_id:int,data:ModerateChatBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'chat.moderate')
     msg=db.get(Message,message_id)
     if not msg:raise HTTPException(404,'الرسالة غير موجودة')
     if not can_moderate_chat(s.user,msg.channel,db):raise HTTPException(403,'لا تملك صلاحية الإشراف على هذه المحادثة')
@@ -1697,10 +1867,12 @@ def activity_rows(me,db,user_id:Optional[int],start:Optional[date],end:Optional[
 
 @app.get('/api/activity')
 def activity(user_id:Optional[int]=None,start:Optional[date]=None,end:Optional[date]=None,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'activity.view')
     return activity_rows(s.user,db,user_id,start,end)[:1000]
 
 @app.get('/api/activity/export')
 def export_activity(user_id:Optional[int]=None,start:Optional[date]=None,end:Optional[date]=None,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'activity.view')
     rows=activity_rows(s.user,db,user_id,start,end)
     cols=[('id','معرف الجلسة'),('name','اسم الموظف'),('department','القسم'),('login_at','تاريخ ووقت الدخول UTC'),('logout_at','تاريخ ووقت الخروج UTC'),('last_seen','آخر اتصال UTC'),('duration_minutes','مدة الاتصال (دقيقة)'),('active_minutes','مدة النشاط المرصود (دقيقة)'),('status','الحالة'),('ended_reason','سبب الإنهاء')]
     stream=io.StringIO();writer=csv.writer(stream);writer.writerow([v for k,v in cols])
@@ -1810,6 +1982,7 @@ def dashboard(db:Session=Depends(get_db),s=Depends(require_login)):
 
 @app.get('/api/audit')
 def audit_logs(db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'audit.view')
     if not is_executive(s.user):raise HTTPException(403,'الصلاحية غير متاحة')
     return [{'action':a.action,'actor_id':a.actor_id,'details':a.details,'created_at':iso(a.created_at)} for a in db.scalars(select(Audit).order_by(Audit.id.desc()).limit(250))]
 
@@ -1873,6 +2046,7 @@ def list_internal_mail(folder:str='inbox',db:Session=Depends(get_db),s=Depends(r
 
 @app.post('/api/inbox',status_code=201)
 def compose_internal_mail(data:InternalMailCompose,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'mail.send')
     receiver=db.get(User,data.recipient_id)
     if not receiver or not receiver.active or receiver.id==s.user_id:
         raise HTTPException(400,'اختر موظفًا نشطًا غير حسابك')
@@ -1917,6 +2091,7 @@ def mark_internal_mail_read(thread_id:int,db:Session=Depends(get_db),s=Depends(r
 
 @app.post('/api/inbox/{thread_id}/reply',status_code=201)
 def reply_internal_mail(thread_id:int,data:InternalMailReply,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'mail.send')
     th=internal_mail_thread(db,thread_id,s.user)
     other_id=th.recipient_id if s.user_id==th.initiator_id else th.initiator_id
     other=db.get(User,other_id)
@@ -1934,6 +2109,8 @@ def reply_internal_mail(thread_id:int,data:InternalMailReply,db:Session=Depends(
 @app.post('/api/inbox/upload',status_code=201)
 async def compose_internal_mail_files(recipient_id:int=Form(...),subject:str=Form(...),body:str=Form(''),
                                       files:list[UploadFile]=File(...),db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'mail.upload')
+    require_permission(db,s.user,'mail.send')
     receiver=db.get(User,recipient_id)
     if not receiver or not receiver.active or receiver.id==s.user_id:
         raise HTTPException(400,'اختر موظفًا نشطًا غير حسابك')
@@ -1952,6 +2129,8 @@ async def compose_internal_mail_files(recipient_id:int=Form(...),subject:str=For
 @app.post('/api/inbox/{thread_id}/reply/upload',status_code=201)
 async def reply_internal_mail_files(thread_id:int,body:str=Form(''),files:list[UploadFile]=File(...),
                                     db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'mail.upload')
+    require_permission(db,s.user,'mail.send')
     th=internal_mail_thread(db,thread_id,s.user)
     other_id=th.recipient_id if s.user_id==th.initiator_id else th.initiator_id
     other=db.get(User,other_id)
@@ -2182,6 +2361,7 @@ def meetings_seen(db:Session=Depends(get_db),s=Depends(require_login)):
 
 @app.post('/api/meetings',status_code=201)
 def create_meeting(data:MeetingCreateBody,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'meetings.create')
     me=s.user
     title=data.title.strip()
     if len(title)<3:raise HTTPException(422,'عنوان الاجتماع قصير')
@@ -2219,6 +2399,7 @@ def read_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_log
 
 @app.post('/api/meetings/{meeting_id}/join')
 def join_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'meetings.join')
     m=meeting_access(db,meeting_id,s.user)
     # Serialize token issuance with the organizer's close request on PostgreSQL.
     m=db.execute(select(VideoMeeting).where(VideoMeeting.id==meeting_id)
@@ -2238,6 +2419,7 @@ def join_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_log
 
 @app.post('/api/meetings/{meeting_id}/end')
 def end_meeting(meeting_id:int,db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'meetings.end')
     m=meeting_access(db,meeting_id,s.user)
     if m.organizer_id!=s.user_id:raise HTTPException(403,'يمكن لمنظّم الاجتماع فقط إنهاؤه')
     # Commit the gate FIRST: prevents the server issuing any new join JWTs.
@@ -2273,6 +2455,7 @@ class MeetingMinutesBody(BaseModel):
 @app.patch('/api/meetings/{meeting_id}/minutes')
 def update_meeting_minutes(meeting_id:int,data:MeetingMinutesBody,
                            db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'meetings.minutes')
     meeting=meeting_access(db,meeting_id,s.user)
     if meeting.organizer_id!=s.user_id:raise HTTPException(403,'محضر الاجتماع متاح للتعديل من المنظم فقط')
     meeting.minutes_text=data.text.strip()
@@ -2389,6 +2572,7 @@ def start_direct_call(data: DirectCallCreateBody,
         raise HTTPException(503, 'خدمة الاتصال المباشر غير متاحة الآن')
     if data.mode not in ('video','audio'):
         raise HTTPException(422, 'نوع الاتصال غير صالح')
+    require_permission(db,s.user,'calls.start.'+data.mode)
     ids = direct_call_invitees(db, s.user, data.invitee_ids, {s.user_id})
     recent = db.scalar(select(func.count(DirectCall.id)).where(
         DirectCall.initiator_id == s.user_id,
@@ -2420,6 +2604,7 @@ def start_direct_call(data: DirectCallCreateBody,
 @app.post('/api/calls/{call_id}/accept')
 def accept_direct_call(call_id: int, db: Session=Depends(get_db),
                        s=Depends(require_login)):
+    require_permission(db,s.user,'calls.accept')
     call, member = direct_call_access(db,call_id,s.user_id)
     call = db.execute(select(DirectCall).where(DirectCall.id==call_id)
                       .with_for_update().execution_options(populate_existing=True)).scalar_one()
@@ -2470,6 +2655,7 @@ def decline_direct_call(call_id: int,db:Session=Depends(get_db),
 @app.post('/api/calls/{call_id}/invite')
 def invite_direct_call(call_id:int,data:DirectCallInviteBody,
                        db:Session=Depends(get_db),s=Depends(require_login)):
+    require_permission(db,s.user,'calls.invite')
     call,member=direct_call_access(db,call_id,s.user_id)
     if call.initiator_id!=s.user_id:
         raise HTTPException(403,'دعوة مشاركين جدد متاحة لمنشئ الاتصال فقط')
@@ -2490,6 +2676,7 @@ def invite_direct_call(call_id:int,data:DirectCallInviteBody,
 @app.post('/api/calls/{call_id}/join')
 def join_direct_call(call_id: int,db:Session=Depends(get_db),
                      s=Depends(require_login)):
+    require_permission(db,s.user,'calls.join')
     call,member=direct_call_access(db,call_id,s.user_id)
     call=db.execute(select(DirectCall).where(DirectCall.id==call_id)
                     .with_for_update().execution_options(populate_existing=True)).scalar_one()
@@ -2506,6 +2693,7 @@ def join_direct_call(call_id: int,db:Session=Depends(get_db),
 @app.post('/api/calls/{call_id}/end')
 def end_direct_call(call_id: int,db:Session=Depends(get_db),
                     s=Depends(require_login)):
+    require_permission(db,s.user,'calls.end')
     call,member=direct_call_access(db,call_id,s.user_id)
     if call.initiator_id!=s.user_id:
         raise HTTPException(403,'إنهاء الاتصال للجميع متاح لمنشئ الاتصال فقط')
