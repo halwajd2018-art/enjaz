@@ -171,7 +171,7 @@ function renderDashboard(){const ds=state.dashboard.by_department||[],t=state.ta
 function renderTasks(){const visible=state.tasks;
  const unassigned=visible.filter(t=>t.assignee_removed&&t.status!=='done').length;
  const warning=unassigned&&state.me.role!=='employee'?`<div class="note" style="margin-bottom:14px">⚠ توجد <b>${unassigned}</b> مهمة غير منجزة كانت مسندة إلى موظفين محذوفين. افتح كل مهمة واختر «إعادة إسناد» لموظف نشط من القسم نفسه. لم تُحذف أي مهمة عند حذف الموظف.</div>`:'';
- const body=`${warning}<div class="page-head"><div><h2>مهام الإدارة</h2><p>التكليف ومتابعة المراحل ونسب الإنجاز والاعتمادات.</p></div>${state.me.role!=='employee'?'<button id="newTask" class="btn">＋ إضافة مهمة</button>':''}</div><div class="panel"><div class="filters"><select id="taskStatus" class="input"><option value="">جميع الحالات</option>${Object.entries(statuses).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select><input id="taskSearch" class="input" placeholder="بحث في المهام..." aria-label="بحث المهام"><span class="hint">${visible.length} مهمة في نطاق صلاحيتك</span></div><div id="taskList" class="grid2"></div></div>`;
+ const body=`${warning}<div class="page-head"><div><h2>مهام الإدارة</h2><p>التكليف ومتابعة المراحل ونسب الإنجاز والاعتمادات.</p></div>${canDo('tasks.create')&&state.me.role!=='employee'?'<button id="newTask" class="btn">＋ إضافة مهمة</button>':''}</div><div class="panel"><div class="filters"><select id="taskStatus" class="input"><option value="">جميع الحالات</option>${Object.entries(statuses).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select><input id="taskSearch" class="input" placeholder="بحث في المهام..." aria-label="بحث المهام"><span class="hint">${visible.length} مهمة في نطاق صلاحيتك</span></div><div id="taskList" class="grid2"></div></div>`;
  renderShell('إدارة المهام',body);const update=()=>{const needle=$('taskSearch').value.trim(),stat=$('taskStatus').value;const ts=visible.filter(t=>(!stat||t.status===stat)&&(!needle||t.title.includes(needle)||t.assignee.includes(needle)));$('taskList').innerHTML=ts.length?ts.map(miniTask).join(''):'<div class="empty">لا توجد مهام مطابقة</div>';attachTasks()};$('taskSearch').oninput=update;$('taskStatus').onchange=update;update();if($('newTask'))$('newTask').onclick=taskCreateModal;}
 function modal(title,html){closeModal();const cover=document.createElement('div');cover.className='modal-cover';cover.innerHTML=`<div class="modal" role="dialog" aria-modal="true" aria-label="${safe(title)}"><button type="button" class="modal-close" id="closeModal">إغلاق ×</button><h2>${safe(title)}</h2>${html}</div>`;document.body.appendChild(cover);$('closeModal').onclick=closeModal;cover.addEventListener('click',e=>{if(e.target===cover)closeModal()});return cover}
 const closeModal=()=>{document.querySelector('.modal-cover')?.remove();if(state.roomChatArchive)stopRoomChat();if(state.discussionTimer){clearInterval(state.discussionTimer);state.discussionTimer=null}};
@@ -282,6 +282,7 @@ async function renderPermissions(){
   '<div class="permission-table-wrap"><table class="permission-table"><thead><tr>'+
   '<th>الصلاحية</th><th>الأصل حسب الدور</th><th>الحالة الفعلية</th><th>قرار المدير</th><th>حدود الصلاحية</th>'+
   '</tr></thead><tbody id="permissionRows"></tbody></table></div>'+
+  '<label class="form-field permission-reason">سبب تعديل الصلاحيات<textarea id="permissionReason" class="input" minlength="5" maxlength="500" rows="2" placeholder="مثال: تفويض مؤقت لبدء الاجتماعات، أو حصر الاتصالات لدى رؤساء الأقسام"></textarea></label>'+ 
   '<div class="permission-actions"><span id="permissionChanged" class="hint"></span>'+
   '<button id="permissionSave" class="btn" disabled>حفظ التعديلات</button></div></section>'+
   '<p class="footer-note">كل تعديل يُسجّل في سجل التدقيق. أي تغيير يُطبّق من الخادم في الطلب التالي، وتُحدّث الأزرار في المتصفح أثناء عمل الجلسة.</p>');
@@ -303,6 +304,7 @@ async function loadPermissionTarget(){
  const data=await api('/permissions/users/'+id);
  if(state.permissionSelectedUserId!==id||state.page!=='permissions')return;
  state.permissionSelectedSnapshot=data;
+ if($('permissionReason'))$('permissionReason').value='';
  state.permissionDraft=Object.fromEntries(Object.entries(data.permissions).map(([key,val])=>[key,val.decision]));
  const changes=$('permissionChanged');if(changes)changes.textContent='';
  const area2=$('permissionTarget');
@@ -361,10 +363,13 @@ async function savePermissionDraft(){
  const data=permissionDraftChanges();
  if(!Object.keys(data).length)return;
  if(!confirm('هل تؤكد تطبيق '+Object.keys(data).length+' تعديل/تعديلات على صلاحيات هذا المستخدم؟'))return;
+ const reason=String($('permissionReason')?.value||'').trim();
+ if(reason.length<5)throw Error('اكتب سببًا واضحًا للتعديل (خمسة أحرف على الأقل)');
  const button=$('permissionSave');if(button)button.disabled=true;
  try{
-  await api('/permissions/users/'+id,{method:'PATCH',data:{decisions:data}});
+  await api('/permissions/users/'+id,{method:'PATCH',data:{decisions:data,reason}});
   await loadPermissionTarget();
+  if($('permissionReason'))$('permissionReason').value='';
   toast('تم حفظ الصلاحيات وتوثيقها في سجل التدقيق');
  }finally{if(button)button.disabled=false}
 }
@@ -674,8 +679,8 @@ async function renderMeetings(){
  const [data,config,contacts]=await Promise.all([api('/meetings'),api('/meetings/config'),api('/meetings/contacts')]);
  state.meetings=data.meetings;state.meetingConfig=config;state.meetingContacts=contacts;state.meetingUnread=0;
  await api('/meetings/seen',{method:'POST'});
- const rows=state.meetings.map(m=>`<article class="panel meeting-card"><div class="meeting-card-head"><div><h3>${safe(m.title)}</h3><p>${localMeetingDate(m.start_at)} · ${m.duration_minutes} دقيقة${m.task_id?' · مرتبطة بالتكليف #'+m.task_id:''}</p></div><span class="pill ${m.status==='scheduled'?'working':'done'}">${m.status==='scheduled'?'مجدول':m.status==='ending'?'جارٍ إغلاق الغرفة':'منتهٍ'}</span></div><p class="hint">${safe(m.description||'لا توجد ملاحظات إضافية')}</p><p class="meeting-members">المشاركون: ${m.participants.map(u=>safe(u.name)).join('، ')}</p>${m.minutes_text?`<div class="meeting-minutes-preview"><strong>محضر الاجتماع</strong><p>${safe(m.minutes_text)}</p></div>`:''}<div class="action-row">${m.is_organizer?`<button class="btn secondary" data-meeting-minutes="${m.id}">محضر الاجتماع</button>`:''}<button class="btn secondary" data-meeting-chat="${m.id}">سجل الدردشة</button><button class="btn" data-join-meeting="${m.id}" ${m.status!=='scheduled'||!config.video_enabled?'disabled':''}>دخول الاجتماع</button>${m.is_organizer&&['scheduled','ending'].includes(m.status)?`<button class="btn outline" data-end-meeting="${m.id}">${m.status==='ending'?'إعادة محاولة إغلاق الغرفة':'إنهاء الاجتماع للجميع'}</button>`:''}</div></article>`).join('');
- renderShell('الاجتماعات المرئية',`<div class="page-head"><div><h2>الاجتماعات المرئية داخل إنجاز</h2><p>دعوات خاصة حسب صلاحيات الإدارة، واجتماعات صوت وصورة ومشاركة شاشة داخل المنصة.</p></div><button id="newVideoMeeting" class="btn">＋ اجتماع جديد</button></div>${!config.video_enabled?'<p class="meeting-setup-warning">ميزة بث الفيديو غير مفعّلة حتى اعتماد وإضافة إعدادات LiveKit الآمنة. يمكنك إعداد الاجتماعات والدعوات الآن.</p>':''}<div class="meeting-cards">${rows||'<section class="panel empty">لا توجد اجتماعات مدعوة لك حتى الآن.</section>'}</div><p class="footer-note">لا يتم تسجيل الصوت أو الصورة، ولا تُخزن الوسائط في قاعدة بيانات إنجاز. الوصول للغرف مقيد بالدعوات.</p>`);
+ const rows=state.meetings.map(m=>`<article class="panel meeting-card"><div class="meeting-card-head"><div><h3>${safe(m.title)}</h3><p>${localMeetingDate(m.start_at)} · ${m.duration_minutes} دقيقة${m.task_id?' · مرتبطة بالتكليف #'+m.task_id:''}</p></div><span class="pill ${m.status==='scheduled'?'working':'done'}">${m.status==='scheduled'?'مجدول':m.status==='ending'?'جارٍ إغلاق الغرفة':'منتهٍ'}</span></div><p class="hint">${safe(m.description||'لا توجد ملاحظات إضافية')}</p><p class="meeting-members">المشاركون: ${m.participants.map(u=>safe(u.name)).join('، ')}</p>${m.minutes_text?`<div class="meeting-minutes-preview"><strong>محضر الاجتماع</strong><p>${safe(m.minutes_text)}</p></div>`:''}<div class="action-row">${m.is_organizer&&canDo('meetings.minutes')?`<button class="btn secondary" data-meeting-minutes="${m.id}">محضر الاجتماع</button>`:''}<button class="btn secondary" data-meeting-chat="${m.id}">سجل الدردشة</button><button class="btn" data-join-meeting="${m.id}" ${m.status!=='scheduled'||!config.video_enabled||!canDo('meetings.join')?'disabled':''}>دخول الاجتماع</button>${m.is_organizer&&canDo('meetings.end')&&['scheduled','ending'].includes(m.status)?`<button class="btn outline" data-end-meeting="${m.id}">${m.status==='ending'?'إعادة محاولة إغلاق الغرفة':'إنهاء الاجتماع للجميع'}</button>`:''}</div></article>`).join('');
+ renderShell('الاجتماعات المرئية',`<div class="page-head"><div><h2>الاجتماعات المرئية داخل إنجاز</h2><p>دعوات خاصة حسب صلاحيات الإدارة، واجتماعات صوت وصورة ومشاركة شاشة داخل المنصة.</p></div><button id="newVideoMeeting" class="btn" ${canDo('meetings.create')?'':'disabled'}>＋ اجتماع جديد</button></div>${!config.video_enabled?'<p class="meeting-setup-warning">ميزة بث الفيديو غير مفعّلة حتى اعتماد وإضافة إعدادات LiveKit الآمنة. يمكنك إعداد الاجتماعات والدعوات الآن.</p>':''}<div class="meeting-cards">${rows||'<section class="panel empty">لا توجد اجتماعات مدعوة لك حتى الآن.</section>'}</div><p class="footer-note">لا يتم تسجيل الصوت أو الصورة، ولا تُخزن الوسائط في قاعدة بيانات إنجاز. الوصول للغرف مقيد بالدعوات.</p>`);
  $('newVideoMeeting').onclick=()=>createVideoMeetingModal();
  document.querySelectorAll('[data-meeting-minutes]').forEach(b=>b.onclick=()=>editMeetingMinutes(Number(b.dataset.meetingMinutes)));
  document.querySelectorAll('[data-meeting-chat]').forEach(b=>b.onclick=()=>openSessionChatArchive('meeting:'+Number(b.dataset.meetingChat),'الاجتماع'));
@@ -891,11 +896,11 @@ async function renderDirectCalls(){
  renderShell('الاتصالات الصوتية والمرئية',
   '<div class="page-head"><div><h2>اتصال مباشر بدون موعد</h2><p>اتصل بموظف أو مجموعة فورًا؛ ستظهر لهم دعوة لقبول المكالمة أو رفضها.</p></div><button class="btn secondary" id="enableDirectAlerts">🔔 تفعيل رنين المكالمات</button></div>'+
   '<section class="panel"><h3>بدء اتصال جديد</h3><form id="directStartForm" class="form-stack">'+
-  '<div class="direct-call-type"><label><input type="radio" name="mode" value="video" checked> 📹 مرئي</label>'+
-  '<label><input type="radio" name="mode" value="audio"> 🎙️ صوتي</label></div>'+
+  '<div class="direct-call-type"><label><input type="radio" name="mode" value="video" '+(canDo('calls.start.video')?'checked':'disabled')+'> 📹 مرئي</label>'+
+  '<label><input type="radio" name="mode" value="audio" '+(canDo('calls.start.audio')&&!canDo('calls.start.video')?'checked':'')+' '+(!canDo('calls.start.audio')?'disabled':'')+'> 🎙️ صوتي</label></div>'+
   '<p class="hint">اختر من موظف واحد إلى 15 موظفًا؛ لا حاجة لإنشاء اجتماع مجدول.</p>'+
   '<div class="direct-contacts">'+directCallContactsMarkup(contacts,[state.me.id])+'</div>'+
-  '<div class="action-row"><button class="btn" type="submit" '+(!response.video_enabled?'disabled':'')+'>بدء الاتصال الآن</button></div></form>'+
+  '<div class="action-row"><button class="btn" type="submit" '+(!response.video_enabled||(!canDo('calls.start.video')&&!canDo('calls.start.audio'))?'disabled':'')+'>بدء الاتصال الآن</button></div></form>'+
   (!response.video_enabled?'<p class="error">خدمة الصوت والصورة غير متاحة من إعدادات النظام.</p>':'')+'</section>'+
   '<section class="panel" style="margin-top:16px"><h3>الاتصالات الحالية والسجل الأخير</h3><div id="directCallHistory"></div></section>'+
   '<p class="footer-note">يظهر تنبيه المكالمة الواردة أثناء فتح إنجاز في المتصفح، وليس كإشعار هاتف خارج التطبيق. لا يُسجَّل صوت أو فيديو المكالمات.</p>');
@@ -905,7 +910,8 @@ async function renderDirectCalls(){
   e.preventDefault();const form=e.currentTarget;
   const ids=Array.from(form.querySelectorAll('input[name="call_invitee"]:checked')).map(i=>Number(i.value));
   if(!ids.length)throw Error('اختر موظفًا واحدًا على الأقل');
-  const mode=form.querySelector('input[name="mode"]:checked').value;
+  const mode=form.querySelector('input[name="mode"]:checked')?.value;
+  if(!mode||!canDo('calls.start.'+mode))throw Error('ليس لديك صلاحية بدء هذا النوع من المكالمات');
   const button=form.querySelector('button[type="submit"]');button.disabled=true;
   try{const call=await api('/calls',{method:'POST',data:{invitee_ids:ids,mode}});
     state.directCalls.unshift(call);await connectDirectCall(call)}
@@ -939,8 +945,8 @@ async function openDirectCallFromEmployee(userId){
  if(!user)throw Error('هذا الموظف غير متاح للاتصال');
  modal('بدء اتصال مع '+user.name,
   '<div class="note">سيظهر للموظف إشعار داخل منصة إنجاز للقبول أو الرفض.</div>'+
-  '<div class="action-row"><button id="quickVideoCall" class="btn">📹 اتصال مرئي</button>'+
-  '<button id="quickAudioCall" class="btn secondary">🎙️ اتصال صوتي</button></div>');
+  '<div class="action-row"><button id="quickVideoCall" class="btn" '+(!canDo('calls.start.video')?'disabled':'')+'>📹 اتصال مرئي</button>'+
+  '<button id="quickAudioCall" class="btn secondary" '+(!canDo('calls.start.audio')?'disabled':'')+'>🎙️ اتصال صوتي</button></div>');
  const start=(mode)=>request(async()=>{
   const call=await api('/calls',{method:'POST',data:{invitee_ids:[userId],mode}});
   closeModal();state.directCalls.unshift(call);await connectDirectCall(call);
